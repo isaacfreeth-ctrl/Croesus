@@ -159,26 +159,136 @@ def format_uk_results(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-# ============= GERMANY (via Bundestag published data) =============
+# ============= GERMANY (Bundestag Scraper) =============
+
+def scrape_bundestag_year(year: int) -> pd.DataFrame:
+    """Scrape donations from Bundestag website for a given year."""
+    from bs4 import BeautifulSoup
+    
+    # URL patterns - the suffix changes each year
+    url_patterns = {
+        2025: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2025/2025-inhalt-1032412',
+        2024: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2024/2024-inhalt-984862',
+        2023: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2023',
+        2022: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2022/2022-inhalt-879480',
+        2021: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2021/2021-inhalt-816896',
+        2020: 'https://www.bundestag.de/parlament/praesidium/parteienfinanzierung/fundstellen50000/2020/2020-inhalt-678704',
+    }
+    
+    url = url_patterns.get(year)
+    if not url:
+        return pd.DataFrame()
+    
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
+    
+    soup = BeautifulSoup(response.text, 'html.parser')
+    tables = soup.find_all('table')
+    
+    if not tables:
+        return pd.DataFrame()
+    
+    table = tables[0]
+    rows = table.find_all('tr')
+    
+    donations = []
+    current_month = None
+    
+    for row in rows[1:]:  # Skip header
+        cells = row.find_all(['td', 'th'])
+        
+        # Month header row (single cell)
+        if len(cells) == 1:
+            current_month = cells[0].get_text(strip=True)
+            continue
+        
+        # Data row
+        if len(cells) >= 4:
+            party = cells[0].get_text(strip=True)
+            amount_text = cells[1].get_text(strip=True)
+            donor_raw = cells[2].get_text(strip=True)
+            date_received = cells[3].get_text(strip=True)
+            
+            # Parse amount
+            amount_match = re.search(r'([\d.,]+)\s*Euro', amount_text)
+            if amount_match:
+                amount_str = amount_match.group(1).replace('.', '').replace(',', '.')
+                try:
+                    amount = float(amount_str)
+                except:
+                    amount = 0
+            else:
+                amount = 0
+            
+            # Clean donor name (remove address parts for display)
+            donor_parts = re.split(r'(?<=[a-zäöü])(?=[A-ZÄÖÜ0-9])|(?<=\.)(?=[A-Z])', donor_raw)
+            donor_name = donor_parts[0] if donor_parts else donor_raw
+            
+            donations.append({
+                'Year': year,
+                'Month': current_month,
+                'Party': party,
+                'Amount': amount,
+                'AmountText': amount_text,
+                'Donor': donor_name,
+                'DonorFull': donor_raw,
+                'DateReceived': date_received,
+                'Source': 'German Bundestag'
+            })
+    
+    return pd.DataFrame(donations)
+
 
 def search_germany_donations(query: str, years: int = 5) -> pd.DataFrame:
     """
-    Search German party donations.
-    Note: Germany publishes large donations (>€35K) on Bundestag website.
-    This function scrapes available structured data.
+    Search German party donations by scraping Bundestag website.
+    Returns donations matching the search query.
     """
-    # The Bundestag publishes donation data but not via a clean API
-    # DonationWatch aggregates this data - we'll note this for the user
+    current_year = datetime.now().year
+    all_donations = []
     
-    # For now, return placeholder with instructions
-    # In production, this would scrape bundestag.de or use DonationWatch data
+    # Scrape each year
+    years_to_search = range(current_year, current_year - years - 1, -1)
     
-    st.info("""
-    **Germany:** Large donations (>€35,000) are published by the Bundestag.
-    For comprehensive German data, also check [DonationWatch](https://donation.watch/en/germany).
-    """)
+    for year in years_to_search:
+        df = scrape_bundestag_year(year)
+        if not df.empty:
+            all_donations.append(df)
     
-    return pd.DataFrame()
+    if not all_donations:
+        return pd.DataFrame()
+    
+    combined = pd.concat(all_donations, ignore_index=True)
+    
+    # Filter by search query (case-insensitive search in donor field)
+    query_lower = query.lower()
+    mask = combined['DonorFull'].str.lower().str.contains(query_lower, na=False)
+    
+    results = combined[mask].copy()
+    
+    return results
+
+
+def format_germany_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Format German results for display."""
+    if df.empty:
+        return df
+    
+    display_cols = ['Donor', 'Party', 'Amount', 'DateReceived', 'Year']
+    available = [c for c in display_cols if c in df.columns]
+    result = df[available].copy()
+    
+    # Rename for display
+    result = result.rename(columns={
+        'Amount': 'Amount (€)',
+        'DateReceived': 'Date Received'
+    })
+    
+    return result
 
 
 # ============= EU LEVEL (APPF) =============
@@ -200,7 +310,7 @@ def search_eu_donations(query: str) -> pd.DataFrame:
 
 # ============= EXCEL EXPORT =============
 
-def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
+def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None) -> BytesIO:
     """
     Create multi-tab Excel report with all donation data.
     """
@@ -216,7 +326,8 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
         top=Side(style='thin'),
         bottom=Side(style='thin')
     )
-    currency_format = '£#,##0.00'
+    currency_format_gbp = '£#,##0.00'
+    currency_format_eur = '€#,##0.00'
     date_format = 'YYYY-MM-DD'
     
     # ===== SUMMARY SHEET =====
@@ -257,8 +368,7 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
         
         ws_summary.cell(row=row, column=1, value="UK").border = border
         ws_summary.cell(row=row, column=2, value=len(uk_data)).border = border
-        cell = ws_summary.cell(row=row, column=3, value=uk_total)
-        cell.number_format = currency_format
+        cell = ws_summary.cell(row=row, column=3, value=f"£{uk_total:,.2f}")
         cell.border = border
         ws_summary.cell(row=row, column=4, value=uk_dates).border = border
         row += 1
@@ -269,12 +379,25 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
         ws_summary.cell(row=row, column=4, value="-").border = border
         row += 1
     
-    # Germany placeholder
-    ws_summary.cell(row=row, column=1, value="Germany").border = border
-    ws_summary.cell(row=row, column=2, value="See DonationWatch").border = border
-    ws_summary.cell(row=row, column=3, value="-").border = border
-    ws_summary.cell(row=row, column=4, value="-").border = border
-    row += 1
+    # Germany stats
+    if germany_data is not None and not germany_data.empty:
+        de_total = germany_data['Amount'].sum() if 'Amount' in germany_data.columns else 0
+        de_dates = ""
+        if 'Year' in germany_data.columns:
+            de_dates = f"{germany_data['Year'].min()} to {germany_data['Year'].max()}"
+        
+        ws_summary.cell(row=row, column=1, value="Germany").border = border
+        ws_summary.cell(row=row, column=2, value=len(germany_data)).border = border
+        cell = ws_summary.cell(row=row, column=3, value=f"€{de_total:,.2f}")
+        cell.border = border
+        ws_summary.cell(row=row, column=4, value=de_dates).border = border
+        row += 1
+    else:
+        ws_summary.cell(row=row, column=1, value="Germany").border = border
+        ws_summary.cell(row=row, column=2, value=0).border = border
+        ws_summary.cell(row=row, column=3, value="-").border = border
+        ws_summary.cell(row=row, column=4, value="-").border = border
+        row += 1
     
     # EU placeholder
     ws_summary.cell(row=row, column=1, value="EU").border = border
@@ -285,7 +408,7 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
     # Adjust column widths
     ws_summary.column_dimensions['A'].width = 20
     ws_summary.column_dimensions['B'].width = 15
-    ws_summary.column_dimensions['C'].width = 15
+    ws_summary.column_dimensions['C'].width = 18
     ws_summary.column_dimensions['D'].width = 25
     
     # ===== UK DATA SHEET =====
@@ -318,6 +441,36 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
             adjusted_width = min(max_length + 2, 50)
             ws_uk.column_dimensions[column].width = adjusted_width
     
+    # ===== GERMANY DATA SHEET =====
+    if germany_data is not None and not germany_data.empty:
+        ws_de = wb.create_sheet("Germany - Bundestag")
+        
+        # Write headers
+        for col, header in enumerate(germany_data.columns, 1):
+            cell = ws_de.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        # Write data
+        for row_idx, row_data in enumerate(germany_data.values, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_de.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        
+        # Adjust column widths
+        for col in ws_de.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws_de.column_dimensions[column].width = adjusted_width
+    
     # ===== DATA SOURCES SHEET =====
     ws_sources = wb.create_sheet("Data Sources")
     
@@ -335,7 +488,7 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame) -> BytesIO:
         f"  URL: {DATA_SOURCES['germany']['url']}",
         f"  Coverage: {DATA_SOURCES['germany']['coverage']}",
         f"  Threshold: {DATA_SOURCES['germany']['threshold']}",
-        "  Note: For aggregated data, see https://donation.watch/en/germany",
+        "  Note: Data scraped from official Bundestag parliamentary publications",
         "",
         "EU Authority for Political Parties",
         f"  URL: {DATA_SOURCES['eu']['url']}",
@@ -416,10 +569,43 @@ if search_button and search_query:
         
         st.divider()
         
-        # Search Germany (placeholder)
+        # Search Germany
         st.write("### 🇩🇪 Germany")
-        germany_results = search_germany_donations(search_query, search_years)
+        with st.spinner("Scraping Bundestag donations data..."):
+            germany_results = search_germany_donations(search_query, search_years)
         all_results['germany'] = germany_results
+        
+        if not germany_results.empty:
+            st.success(f"Found {len(germany_results)} donation records in Germany")
+            
+            # Display summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_value = germany_results['Amount'].sum()
+                st.metric("Total Value", f"€{total_value:,.2f}")
+            with col2:
+                st.metric("Number of Donations", len(germany_results))
+            with col3:
+                unique_parties = germany_results['Party'].nunique()
+                st.metric("Parties", unique_parties)
+            
+            # Display formatted table
+            formatted_de = format_germany_results(germany_results)
+            st.dataframe(formatted_de, use_container_width=True, hide_index=True)
+            
+            # Party breakdown
+            if 'Party' in germany_results.columns:
+                st.write("**Donations by Party:**")
+                party_summary = germany_results.groupby('Party').agg({
+                    'Amount': ['sum', 'count']
+                }).round(2)
+                party_summary.columns = ['Total (€)', 'Count']
+                party_summary = party_summary.sort_values('Total (€)', ascending=False)
+                st.dataframe(party_summary, use_container_width=True)
+        else:
+            st.info("No German donation records found for this search term.")
+        
+        st.caption("**Note:** German data covers large donations >€35,000 (since March 2024) or >€50,000 (before March 2024).")
         
         st.divider()
         
@@ -434,7 +620,7 @@ if search_button and search_query:
         st.write("### 📥 Export Results")
         
         # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results)
+        excel_file = create_excel_report(search_query, uk_results, germany_results)
         
         st.download_button(
             label="📊 Download Excel Report",
