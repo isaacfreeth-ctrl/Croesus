@@ -43,6 +43,12 @@ DATA_SOURCES = {
         "threshold": "€35,000 (immediate), €10,000 (annual reports)",
         "url": "https://www.bundestag.de/parlament/parteienfinanzierung"
     },
+    "austria": {
+        "name": "Austrian Court of Audit (Rechnungshof)",
+        "coverage": "2019-present",
+        "threshold": "€500 (disclosure), €2,500 (immediate)",
+        "url": "https://www.rechnungshof.gv.at"
+    },
     "eu": {
         "name": "EU Authority for Political Parties",
         "coverage": "2018-present",
@@ -399,9 +405,155 @@ def format_eu_results(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+# ============= AUSTRIA (Rechnungshof) =============
+
+def download_austria_csv(url: str) -> str:
+    """Download Austrian donation CSV file."""
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            return response.text
+    except Exception as e:
+        st.warning(f"Failed to download Austrian data: {e}")
+    return None
+
+
+def parse_austria_csv(csv_text: str, year: int) -> list:
+    """Parse Austrian Rechnungshof CSV data."""
+    if not csv_text:
+        return []
+    
+    donations = []
+    lines = csv_text.strip().split('\n')
+    
+    # Find the header row (contains 'Partei' and 'Betrag')
+    header_idx = 0
+    for i, line in enumerate(lines):
+        if 'Partei' in line and 'Betrag' in line:
+            header_idx = i
+            break
+    
+    # Parse header to get column indices
+    header = lines[header_idx].replace('\r', '').split(';')
+    
+    # Map column names (handle variations)
+    col_map = {}
+    for i, col in enumerate(header):
+        col_clean = col.strip().replace('\ufeff', '')
+        if 'Partei' == col_clean:
+            col_map['party'] = i
+        elif 'Name_der_Spenderin' in col_clean or 'Name' in col_clean:
+            col_map['donor'] = i
+        elif 'Betrag' in col_clean:
+            col_map['amount'] = i
+        elif 'Spendeneingangsdatum' in col_clean:
+            col_map['date'] = i
+        elif 'PLZ' in col_clean:
+            col_map['plz'] = i
+        elif 'Empfaengerin' in col_clean or 'Empfänger' in col_clean:
+            col_map['recipient'] = i
+    
+    # Parse data rows
+    for line in lines[header_idx + 1:]:
+        if not line.strip():
+            continue
+        
+        fields = line.replace('\r', '').split(';')
+        
+        try:
+            # Get party
+            party = fields[col_map.get('party', 0)].strip() if 'party' in col_map else ''
+            if not party:
+                continue
+            
+            # Get donor
+            donor = fields[col_map.get('donor', 3)].strip() if 'donor' in col_map else ''
+            if not donor:
+                continue
+            
+            # Get amount (handle German number format: 1.000,00)
+            amount_str = fields[col_map.get('amount', 5)].strip() if 'amount' in col_map else '0'
+            # Remove thousands separator (.) and convert decimal comma to point
+            amount_str = amount_str.replace('.', '').replace(',', '.')
+            try:
+                amount = float(amount_str)
+            except:
+                continue
+            
+            # Get date if available
+            date_str = fields[col_map.get('date', 2)].strip() if 'date' in col_map else ''
+            
+            # Get recipient (more specific than party)
+            recipient = fields[col_map.get('recipient', 7)].strip() if 'recipient' in col_map else party
+            
+            donations.append({
+                'Party': party,
+                'Donor': donor,
+                'Amount': amount,
+                'Date': date_str,
+                'Recipient': recipient,
+                'Year': year,
+                'Source': 'Austria Rechnungshof'
+            })
+        except (IndexError, ValueError) as e:
+            continue
+    
+    return donations
+
+
+def search_austria_donations(query: str) -> pd.DataFrame:
+    """
+    Search Austrian Rechnungshof donation data.
+    Downloads CSV files from the Court of Audit website.
+    """
+    # Austrian CSV file URLs (different paths per year)
+    austria_files = {
+        2025: "https://www.rechnungshof.gv.at/rh/home/was-wir-tun/was-wir-tun_5/was-wir-tun_5/Parteispenden2025/Parteispenden_2025.csv",
+        2024: "https://www.rechnungshof.gv.at/rh/home/was-wir-tun/was-wir-tun_5/was-wir-tun_5/Parteispenden/Parteispenden_2024.csv",
+        2023: "https://www.rechnungshof.gv.at/rh/home/was-wir-tun/was-wir-tun_5/was-wir-tun_5/was-wir-tun_9/Parteispenden_2023.csv",
+    }
+    
+    all_donations = []
+    
+    for year, url in austria_files.items():
+        csv_text = download_austria_csv(url)
+        if csv_text:
+            donations = parse_austria_csv(csv_text, year)
+            all_donations.extend(donations)
+    
+    if not all_donations:
+        st.warning("No Austrian donation data could be loaded.")
+        return pd.DataFrame()
+    
+    # Convert to DataFrame and search
+    df = pd.DataFrame(all_donations)
+    
+    # Filter by query (case-insensitive search in Donor field)
+    query_lower = query.lower()
+    mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
+    
+    return df[mask].copy()
+
+
+def format_austria_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Format Austrian results for display."""
+    if df.empty:
+        return df
+    
+    display_cols = ['Donor', 'Party', 'Amount', 'Date', 'Year']
+    available = [c for c in display_cols if c in df.columns]
+    result = df[available].copy()
+    
+    result = result.rename(columns={
+        'Amount': 'Amount (€)'
+    })
+    
+    return result
+
+
 # ============= EXCEL EXPORT =============
 
-def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
+def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, austria_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
     """
     Create multi-tab Excel report with all donation data.
     """
@@ -508,6 +660,26 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         ws_summary.cell(row=row, column=2, value=0).border = border
         ws_summary.cell(row=row, column=3, value="-").border = border
         ws_summary.cell(row=row, column=4, value="-").border = border
+        row += 1
+    
+    # Austria stats
+    if austria_data is not None and not austria_data.empty:
+        at_total = austria_data['Amount'].sum() if 'Amount' in austria_data.columns else 0
+        at_dates = ""
+        if 'Year' in austria_data.columns:
+            at_dates = f"{austria_data['Year'].min()} to {austria_data['Year'].max()}"
+        
+        ws_summary.cell(row=row, column=1, value="Austria").border = border
+        ws_summary.cell(row=row, column=2, value=len(austria_data)).border = border
+        cell = ws_summary.cell(row=row, column=3, value=f"€{at_total:,.2f}")
+        cell.border = border
+        ws_summary.cell(row=row, column=4, value=at_dates).border = border
+        row += 1
+    else:
+        ws_summary.cell(row=row, column=1, value="Austria").border = border
+        ws_summary.cell(row=row, column=2, value=0).border = border
+        ws_summary.cell(row=row, column=3, value="-").border = border
+        ws_summary.cell(row=row, column=4, value="-").border = border
     
     # Adjust column widths
     ws_summary.column_dimensions['A'].width = 20
@@ -605,6 +777,36 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
             adjusted_width = min(max_length + 2, 50)
             ws_eu.column_dimensions[column].width = adjusted_width
     
+    # ===== AUSTRIA DATA SHEET =====
+    if austria_data is not None and not austria_data.empty:
+        ws_at = wb.create_sheet("Austria - Rechnungshof")
+        
+        # Write headers
+        for col, header in enumerate(austria_data.columns, 1):
+            cell = ws_at.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        # Write data
+        for row_idx, row_data in enumerate(austria_data.values, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_at.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        
+        # Adjust column widths
+        for col in ws_at.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws_at.column_dimensions[column].width = adjusted_width
+    
     # ===== DATA SOURCES SHEET =====
     ws_sources = wb.create_sheet("Data Sources")
     
@@ -623,6 +825,12 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         f"  Coverage: {DATA_SOURCES['germany']['coverage']}",
         f"  Threshold: {DATA_SOURCES['germany']['threshold']}",
         "  Note: Data scraped from official Bundestag parliamentary publications",
+        "",
+        "Austrian Court of Audit (Rechnungshof)",
+        f"  URL: {DATA_SOURCES['austria']['url']}",
+        f"  Coverage: {DATA_SOURCES['austria']['coverage']}",
+        f"  Threshold: {DATA_SOURCES['austria']['threshold']}",
+        "  Note: CSV data from official Rechnungshof publications",
         "",
         "EU Authority for Political Parties (APPF)",
         f"  URL: {DATA_SOURCES['eu']['url']}",
@@ -748,6 +956,46 @@ if search_button and search_query:
         
         st.divider()
         
+        # Search Austria
+        st.write("### 🇦🇹 Austria")
+        with st.spinner("Downloading Austrian Rechnungshof donations data..."):
+            austria_results = search_austria_donations(search_query)
+        all_results['austria'] = austria_results
+        
+        if not austria_results.empty:
+            st.success(f"Found {len(austria_results)} donation records in Austria")
+            
+            # Display summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_value = austria_results['Amount'].sum()
+                st.metric("Total Value", f"€{total_value:,.2f}")
+            with col2:
+                st.metric("Number of Donations", len(austria_results))
+            with col3:
+                unique_parties = austria_results['Party'].nunique()
+                st.metric("Parties", unique_parties)
+            
+            # Display formatted table
+            formatted_at = format_austria_results(austria_results)
+            st.dataframe(formatted_at, use_container_width=True, hide_index=True)
+            
+            # Party breakdown
+            if 'Party' in austria_results.columns:
+                st.write("**Donations by Party:**")
+                party_summary = austria_results.groupby('Party').agg({
+                    'Amount': ['sum', 'count']
+                }).round(2)
+                party_summary.columns = ['Total (€)', 'Count']
+                party_summary = party_summary.sort_values('Total (€)', ascending=False)
+                st.dataframe(party_summary, use_container_width=True)
+        else:
+            st.info("No Austrian donation records found for this search term.")
+        
+        st.caption("**Note:** Austrian data covers donations >€500. Threshold for immediate reporting: €2,500.")
+        
+        st.divider()
+        
         # Search EU
         st.write("### 🇪🇺 European Union")
         with st.spinner("Downloading EU APPF donations data..."):
@@ -792,7 +1040,7 @@ if search_button and search_query:
         st.write("### 📥 Export Results")
         
         # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results, germany_results, eu_results)
+        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, eu_results)
         
         st.download_button(
             label="📊 Download Excel Report",
