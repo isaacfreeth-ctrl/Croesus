@@ -35,37 +35,43 @@ DATA_SOURCES = {
         "name": "UK Electoral Commission",
         "coverage": "Last 5 years (API has data from 2001)",
         "threshold": "£11,180 (central), £2,230 (accounting units)",
-        "url": "https://search.electoralcommission.org.uk"
+        "url": "https://search.electoralcommission.org.uk",
+        "includes": "Parties AND individual MPs/Lords"
     },
     "germany": {
         "name": "German Bundestag",
         "coverage": "2002-present (immediate disclosure >€35K)",
         "threshold": "€35,000 (immediate), €10,000 (annual reports)",
-        "url": "https://www.bundestag.de/parlament/parteienfinanzierung"
+        "url": "https://www.bundestag.de/parlament/parteienfinanzierung",
+        "includes": "Parties only (MPs cannot accept monetary donations)"
     },
     "austria": {
         "name": "Austrian Court of Audit (Rechnungshof)",
         "coverage": "2019-present",
         "threshold": "€500 (disclosure), €2,500 (immediate)",
-        "url": "https://www.rechnungshof.gv.at"
+        "url": "https://www.rechnungshof.gv.at",
+        "includes": "Parties only"
     },
     "italy": {
         "name": "Italian Parliament / Transparency International",
         "coverage": "2018-present",
         "threshold": "€500 (disclosure), €5,000 (donor name required)",
-        "url": "https://soldiepolitica.it"
+        "url": "https://soldiepolitica.it",
+        "includes": "Parties only (MP data fragmented/separate)"
     },
     "netherlands": {
         "name": "Dutch Ministry of Interior (BZK)",
         "coverage": "2023-present",
         "threshold": "€10,000 (immediate disclosure), €1,000 (annual)",
-        "url": "https://www.rijksoverheid.nl/onderwerpen/democratie/rol-politieke-partijen/giften-en-subsidies-politieke-partijen"
+        "url": "https://www.rijksoverheid.nl/onderwerpen/democratie/rol-politieke-partijen/giften-en-subsidies-politieke-partijen",
+        "includes": "Parties only (candidate data separate)"
     },
     "eu": {
         "name": "EU Authority for Political Parties",
         "coverage": "2018-present",
         "threshold": "€12,000",
-        "url": "https://www.appf.europa.eu"
+        "url": "https://www.appf.europa.eu",
+        "includes": "EU-level parties only (MEP data on EP website)"
     }
 }
 
@@ -76,6 +82,7 @@ with st.sidebar:
         with st.expander(f"🔹 {source['name']}"):
             st.write(f"**Coverage:** {source['coverage']}")
             st.write(f"**Threshold:** {source['threshold']}")
+            st.write(f"**Includes:** {source.get('includes', 'Parties')}")
             st.link_button("Visit source", source['url'])
     
     st.divider()
