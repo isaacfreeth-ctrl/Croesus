@@ -49,6 +49,12 @@ DATA_SOURCES = {
         "threshold": "€500 (disclosure), €2,500 (immediate)",
         "url": "https://www.rechnungshof.gv.at"
     },
+    "italy": {
+        "name": "Italian Parliament / Transparency International",
+        "coverage": "2018-present",
+        "threshold": "€500 (disclosure), €5,000 (donor name required)",
+        "url": "https://soldiepolitica.it"
+    },
     "eu": {
         "name": "EU Authority for Political Parties",
         "coverage": "2018-present",
@@ -551,9 +557,104 @@ def format_austria_results(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+# ============= ITALY (Transparency International / OnData) =============
+
+# GitHub URLs for Italian political finance data (from OnData's liberiamoli-tutti)
+ITALY_DATA_URLS = {
+    "2024": "https://raw.githubusercontent.com/ondata/liberiamoli-tutti/main/soldi_e_politica/output/ART_5_DL_149_2013_L_3_2019_dal_01012024_al_31122024.csv",
+    "2025": "https://raw.githubusercontent.com/ondata/liberiamoli-tutti/main/soldi_e_politica/output/ART_5_DL_149_2013_L_3_2019_dal_01012025_.csv",
+    "historical": "https://raw.githubusercontent.com/ondata/liberiamoli-tutti/main/soldi_e_politica/dati/political_finance.csv",
+}
+
+
+def download_italy_data() -> pd.DataFrame:
+    """Download Italian political finance data from GitHub."""
+    all_data = []
+    
+    # Download recent data (2024-2025)
+    for year, url in [("2024", ITALY_DATA_URLS["2024"]), ("2025", ITALY_DATA_URLS["2025"])]:
+        try:
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                from io import StringIO
+                df = pd.read_csv(StringIO(response.text))
+                # Standardize columns
+                df_clean = pd.DataFrame({
+                    'Donor': df['soggetto_erogante'],
+                    'Party': df['partito'],
+                    'Amount': df['valore'],
+                    'Date': df['data_erogazione'],
+                    'Year': df['anno'].fillna(int(year)),
+                    'Source': 'Italy Parliament'
+                })
+                all_data.append(df_clean)
+        except Exception as e:
+            st.warning(f"Failed to download Italy {year} data: {e}")
+    
+    # Download historical data (2018-2022)
+    try:
+        response = requests.get(ITALY_DATA_URLS["historical"], timeout=60)
+        if response.status_code == 200:
+            from io import StringIO
+            df = pd.read_csv(StringIO(response.text), low_memory=False)
+            # Build donor name from name columns
+            df['Donor'] = (df['donor_last_name_01'].fillna('') + ' ' + 
+                          df['donor_name_01'].fillna('')).str.strip()
+            df_clean = pd.DataFrame({
+                'Donor': df['Donor'],
+                'Party': df['recipient_party'],
+                'Amount': df['donation_amount'],
+                'Date': df['donation_date'],
+                'Year': df['donation_year'],
+                'Source': 'Italy Parliament'
+            })
+            all_data.append(df_clean)
+    except Exception as e:
+        st.warning(f"Failed to download Italy historical data: {e}")
+    
+    if all_data:
+        combined = pd.concat(all_data, ignore_index=True)
+        # Remove duplicates (in case of overlap)
+        combined = combined.drop_duplicates(subset=['Donor', 'Party', 'Amount', 'Year'])
+        return combined
+    
+    return pd.DataFrame()
+
+
+def search_italy_donations(query: str) -> pd.DataFrame:
+    """Search Italian political donations data."""
+    df = download_italy_data()
+    
+    if df.empty:
+        st.warning("No Italian donation data could be loaded.")
+        return pd.DataFrame()
+    
+    # Filter by query (case-insensitive search in Donor field)
+    query_lower = query.lower()
+    mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
+    
+    return df[mask].copy()
+
+
+def format_italy_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Format Italian results for display."""
+    if df.empty:
+        return df
+    
+    display_cols = ['Donor', 'Party', 'Amount', 'Date', 'Year']
+    available = [c for c in display_cols if c in df.columns]
+    result = df[available].copy()
+    
+    result = result.rename(columns={
+        'Amount': 'Amount (€)'
+    })
+    
+    return result
+
+
 # ============= EXCEL EXPORT =============
 
-def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, austria_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
+def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, austria_data: pd.DataFrame = None, italy_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
     """
     Create multi-tab Excel report with all donation data.
     """
@@ -677,6 +778,26 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         row += 1
     else:
         ws_summary.cell(row=row, column=1, value="Austria").border = border
+        ws_summary.cell(row=row, column=2, value=0).border = border
+        ws_summary.cell(row=row, column=3, value="-").border = border
+        ws_summary.cell(row=row, column=4, value="-").border = border
+        row += 1
+    
+    # Italy stats
+    if italy_data is not None and not italy_data.empty:
+        it_total = italy_data['Amount'].sum() if 'Amount' in italy_data.columns else 0
+        it_dates = ""
+        if 'Year' in italy_data.columns:
+            it_dates = f"{int(italy_data['Year'].min())} to {int(italy_data['Year'].max())}"
+        
+        ws_summary.cell(row=row, column=1, value="Italy").border = border
+        ws_summary.cell(row=row, column=2, value=len(italy_data)).border = border
+        cell = ws_summary.cell(row=row, column=3, value=f"€{it_total:,.2f}")
+        cell.border = border
+        ws_summary.cell(row=row, column=4, value=it_dates).border = border
+        row += 1
+    else:
+        ws_summary.cell(row=row, column=1, value="Italy").border = border
         ws_summary.cell(row=row, column=2, value=0).border = border
         ws_summary.cell(row=row, column=3, value="-").border = border
         ws_summary.cell(row=row, column=4, value="-").border = border
@@ -807,6 +928,36 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
             adjusted_width = min(max_length + 2, 50)
             ws_at.column_dimensions[column].width = adjusted_width
     
+    # ===== ITALY DATA SHEET =====
+    if italy_data is not None and not italy_data.empty:
+        ws_it = wb.create_sheet("Italy - Parliament")
+        
+        # Write headers
+        for col, header in enumerate(italy_data.columns, 1):
+            cell = ws_it.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        # Write data
+        for row_idx, row_data in enumerate(italy_data.values, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_it.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        
+        # Adjust column widths
+        for col in ws_it.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws_it.column_dimensions[column].width = adjusted_width
+    
     # ===== DATA SOURCES SHEET =====
     ws_sources = wb.create_sheet("Data Sources")
     
@@ -838,6 +989,13 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         f"  Threshold: {DATA_SOURCES['eu']['threshold']}",
         "  Note: Covers European political parties (EPP, PES, ALDE, ECR, etc.)",
         "  Data from published Excel files at appf.europa.eu/appf/en/donations-and-contributions",
+        "",
+        "Italian Parliament / Transparency International Italia",
+        f"  URL: {DATA_SOURCES['italy']['url']}",
+        f"  Coverage: {DATA_SOURCES['italy']['coverage']}",
+        f"  Threshold: {DATA_SOURCES['italy']['threshold']}",
+        "  Note: Data aggregated by OnData from official Parliament publications",
+        "  Corporate donations allowed (€100K annual cap per donor)",
         "",
         "Disclaimer:",
         "This report aggregates publicly available data from official sources.",
@@ -996,6 +1154,46 @@ if search_button and search_query:
         
         st.divider()
         
+        # Search Italy
+        st.write("### 🇮🇹 Italy")
+        with st.spinner("Downloading Italian political donations data..."):
+            italy_results = search_italy_donations(search_query)
+        all_results['italy'] = italy_results
+        
+        if not italy_results.empty:
+            st.success(f"Found {len(italy_results)} donation records in Italy")
+            
+            # Display summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_value = italy_results['Amount'].sum()
+                st.metric("Total Value", f"€{total_value:,.2f}")
+            with col2:
+                st.metric("Number of Donations", len(italy_results))
+            with col3:
+                unique_parties = italy_results['Party'].nunique()
+                st.metric("Parties", unique_parties)
+            
+            # Display formatted table
+            formatted_it = format_italy_results(italy_results)
+            st.dataframe(formatted_it, use_container_width=True, hide_index=True)
+            
+            # Party breakdown
+            if 'Party' in italy_results.columns:
+                st.write("**Donations by Party:**")
+                party_summary = italy_results.groupby('Party').agg({
+                    'Amount': ['sum', 'count']
+                }).round(2)
+                party_summary.columns = ['Total (€)', 'Count']
+                party_summary = party_summary.sort_values('Total (€)', ascending=False)
+                st.dataframe(party_summary, use_container_width=True)
+        else:
+            st.info("No Italian donation records found for this search term.")
+        
+        st.caption("**Note:** Italian data covers donations >€500. Data includes 2018-2024 from Parliament publications.")
+        
+        st.divider()
+        
         # Search EU
         st.write("### 🇪🇺 European Union")
         with st.spinner("Downloading EU APPF donations data..."):
@@ -1040,7 +1238,7 @@ if search_button and search_query:
         st.write("### 📥 Export Results")
         
         # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, eu_results)
+        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, italy_results, eu_results)
         
         st.download_button(
             label="📊 Download Excel Report",
