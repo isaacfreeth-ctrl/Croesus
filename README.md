@@ -1,99 +1,83 @@
 # European Political Donations Tracker
 
-Search for company or individual donations to political parties across European jurisdictions.
+Search for company/donor donations to political parties across multiple European jurisdictions.
 
-## Jurisdictions Covered
+## Features
 
-| Country | Source | Threshold | Data Format | Years |
-|---------|--------|-----------|-------------|-------|
-| 🇬🇧 UK | Electoral Commission | £11,180 | API (CSV) | 2001+ |
-| 🇩🇪 Germany | Bundestag | €35,000 | Web scraping | 2002+ |
-| 🇦🇹 Austria | Rechnungshof | €500 | CSV | 2023-2025 |
-| 🇮🇹 Italy | Parliament/TI Italia | €500 | CSV (GitHub) | 2018-2024 |
-| 🇳🇱 Netherlands | Ministry BZK | €10,000 | ODS | 2023-2024 |
-| 🇪🇺 EU | APPF | €12,000 | Excel | 2018+ |
+- **Multi-jurisdiction search**: Enter a company name and search across UK, Germany, and EU-level databases
+- **UK Electoral Commission**: Full integration with live API - searches donations from 2001-present
+- **German Bundestag**: Live scraping of large donation disclosures (>€35K)
+- **EU APPF**: Downloads and parses official European Political Party donation files
+- **Excel export**: Download comprehensive reports with:
+  - Summary sheet with totals by jurisdiction
+  - Raw data tabs for each country/level
+  - Data sources documentation
+
+## Data Sources
+
+| Country | Source | Coverage | Threshold |
+|---------|--------|----------|-----------|
+| 🇬🇧 UK | Electoral Commission | 2001-present | £11,180 (central), £2,230 (local) |
+| 🇩🇪 Germany | Bundestag | 2020-present | €35,000 (since Mar 2024), €50,000 (before) |
+| 🇪🇺 EU | APPF | 2018-present | €12,000 |
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
 ```
 
 ## Usage
 
-1. Enter a company or individual name in the search box
-2. Click "Search" to query all databases
-3. View results by jurisdiction
-4. Download Excel report with all data
+```bash
+streamlit run app.py
+```
 
-## Data Sources
+Then open http://localhost:8501 in your browser.
 
-### UK Electoral Commission
-- URL: https://search.electoralcommission.org.uk
-- Coverage: 2001-present
-- Direct API access with CSV export
+## Search Examples
 
-### German Bundestag
-- URL: https://www.bundestag.de/parlament/parteienfinanzierung
-- Coverage: 2002-present (immediate disclosure)
-- Web scraping of official publications
-- Threshold changed from €50K to €35K in March 2024
+**UK donors:**
+- `JCB` - Major Conservative donor
+- `Unite` - Trade union donations
 
-### Austrian Rechnungshof (Court of Audit)
-- URL: https://www.rechnungshof.gv.at
-- Coverage: 2023-2025
-- CSV data from official publications
-- Threshold: €500 for disclosure, €2,500 for immediate reporting
+**German donors:**
+- `Viessmann` - Multi-party donor (CDU, CSU, SPD, FDP, Grüne)
+- `Maschmeyer` - Individual donor
 
-### Italian Parliament / Transparency International Italia
-- URL: https://soldiepolitica.it
-- Data: https://github.com/ondata/liberiamoli-tutti
-- Coverage: 2018-2024
-- Threshold: €500 for disclosure
-- Corporate donations allowed (€100K annual cap)
+**EU-level donors:**
+- `Microsoft` - Tech company donations to ALDE
+- `AT&T` - Telecom donations to multiple European parties
 
-### Dutch Ministry of Interior (BZK)
-- URL: https://www.rijksoverheid.nl
-- Coverage: 2023-2024
-- ODS (OpenDocument Spreadsheet) files
-- Threshold: €10,000 for immediate disclosure, €1,000 for annual reports
-- Foreign donations banned, max €100K per donor
-- Most donations from politicians (GL, SP especially)
+## Output
 
-### EU Authority for Political Parties (APPF)
-- URL: https://www.appf.europa.eu
-- Coverage: 2018-present
-- Excel files from official website
+The Excel report includes:
 
-## Example Searches
-
-- Corporate (NL): "B.V.", "Stichting", "Fonds", "Holding"
-- Corporate (IT): "SRL", "SPA", "Società"
-- Corporate (DE/AT): "GmbH", "AG", "Stiftung"
-- Corporate (UK): "Ltd", "PLC"
-
-## Data Highlights
-
-### Netherlands (2023-2024)
-- ~500 donations tracked (>€10K threshold)
-- Total: ~€9M
-- Most donations are from politicians to their own parties
-- Corporate donors: ~65 (B.V., Stichting, Fonds)
-- Major parties: SP, GL, VVD, D66, FvD, Volt
-
-### Regulatory Notes
-- Netherlands: Foreign donations BANNED since 2023
-- Netherlands: Max €100K per donor per year
-- Netherlands: €10K+ must be reported within 3 days
-- Italy: Foreign donations restricted
-- Germany: No cap on individual donations
-- UK: Donors must be UK-registered
+1. **Summary** - Overview with totals by jurisdiction (£ for UK, € for Germany/EU)
+2. **UK - Electoral Commission** - Full raw data
+3. **Germany - Bundestag** - Scraped donation data
+4. **EU - APPF** - European political party donations
+5. **Data Sources** - Methodology documentation
 
 ## Notes
 
-- Different countries have different disclosure thresholds
-- Netherlands has highest disclosure threshold (€10K)
-- Austria has lowest threshold (€500)
-- Most Dutch party funding comes from MP contributions
-- Corporate influence more visible in Italy, Germany
+- Different jurisdictions have different disclosure thresholds
+- UK data is most comprehensive with lower thresholds
+- German data only includes large donations (>€35K since March 2024)
+- EU data covers European-level political parties (EPP, S&D, ALDE, etc.)
+- Corporate donations are allowed in UK, Germany, and at EU level
+- France bans corporate donations (not included in this tool)
+
+## Technical Details
+
+### Data Retrieval Methods
+
+| Source | Method | Format |
+|--------|--------|--------|
+| UK | REST API (CSV export) | CSV |
+| Germany | Web scraping | HTML tables |
+| EU APPF | Direct download | Excel files |
+
+## License
+
+For research and journalistic purposes.
