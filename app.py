@@ -1352,14 +1352,12 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
 def parse_boolean_query(query: str) -> dict:
     """
     Parse a Boolean search query into components.
-    Supports: AND, OR, NOT operators (case-insensitive)
+    Supports: OR, NOT operators (case-insensitive)
     Returns dict with 'type' and 'terms' or nested structure.
     
     Examples:
         "Google" -> single term search
-        "Google AND Microsoft" -> all terms must match
         "Google OR Microsoft" -> any term matches
-        "Google AND Microsoft OR Apple" -> (Google AND Microsoft) OR Apple
         "NOT Google" -> exclude Google
     """
     query = query.strip()
@@ -1374,7 +1372,7 @@ def parse_boolean_query(query: str) -> dict:
             'term': query[4:].strip()
         }
     
-    # Split by OR first (lower precedence)
+    # Split by OR
     if ' OR ' in query_upper:
         parts = []
         current = ""
@@ -1397,29 +1395,6 @@ def parse_boolean_query(query: str) -> dict:
                 'terms': [parse_boolean_query(p) for p in parts]
             }
     
-    # Split by AND (higher precedence)
-    if ' AND ' in query_upper:
-        parts = []
-        current = ""
-        i = 0
-        while i < len(query):
-            if query_upper[i:i+5] == ' AND ':
-                if current.strip():
-                    parts.append(current.strip())
-                current = ""
-                i += 5
-            else:
-                current += query[i]
-                i += 1
-        if current.strip():
-            parts.append(current.strip())
-        
-        if len(parts) > 1:
-            return {
-                'type': 'AND',
-                'terms': [parse_boolean_query(p) for p in parts]
-            }
-    
     # Simple term
     return {
         'type': 'TERM',
@@ -1427,7 +1402,7 @@ def parse_boolean_query(query: str) -> dict:
     }
 
 
-def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str) -> pd.DataFrame:
+def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str, exclusions: set = None) -> pd.DataFrame:
     """
     Apply a parsed Boolean query to filter a DataFrame.
     
@@ -1435,6 +1410,7 @@ def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str) -> pd.DataF
         df: DataFrame to filter
         query: Parsed Boolean query from parse_boolean_query()
         column: Column name to search in
+        exclusions: Set of donor names to exclude from results
     
     Returns:
         Filtered DataFrame
@@ -1450,13 +1426,7 @@ def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str) -> pd.DataF
     if query['type'] == 'TERM':
         term = query['term'].lower()
         mask = col_lower.str.contains(term, na=False)
-        return df[mask].copy()
-    
-    elif query['type'] == 'AND':
-        result = df.copy()
-        for sub_query in query['terms']:
-            result = apply_boolean_filter(result, sub_query, column)
-        return result
+        result = df[mask].copy()
     
     elif query['type'] == 'OR':
         masks = []
@@ -1471,14 +1441,21 @@ def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str) -> pd.DataF
         combined_mask = masks[0]
         for m in masks[1:]:
             combined_mask = combined_mask | m
-        return df[combined_mask].copy()
+        result = df[combined_mask].copy()
     
     elif query['type'] == 'NOT':
         term = query['term'].lower()
         mask = ~col_lower.str.contains(term, na=False)
-        return df[mask].copy()
+        result = df[mask].copy()
     
-    return df
+    else:
+        result = df
+    
+    # Apply exclusions if provided
+    if exclusions and not result.empty and column in result.columns:
+        result = result[~result[column].isin(exclusions)]
+    
+    return result
 
 
 def get_search_terms(query: str) -> list:
@@ -1489,7 +1466,7 @@ def get_search_terms(query: str) -> list:
     def extract_terms(q):
         if q['type'] == 'TERM':
             terms.append(q['term'])
-        elif q['type'] in ('AND', 'OR'):
+        elif q['type'] == 'OR':
             for sub in q['terms']:
                 extract_terms(sub)
         elif q['type'] == 'NOT':
@@ -1502,26 +1479,32 @@ def get_search_terms(query: str) -> list:
 def is_boolean_query(query: str) -> bool:
     """Check if query contains Boolean operators."""
     query_upper = query.upper()
-    return ' AND ' in query_upper or ' OR ' in query_upper or query_upper.startswith('NOT ')
+    return ' OR ' in query_upper or query_upper.startswith('NOT ')
 
 
 # ============= MAIN INTERFACE CONTINUED =============
+
+# Initialize session state for exclusions and results
+if 'excluded_donors' not in st.session_state:
+    st.session_state.excluded_donors = set()
+if 'raw_results' not in st.session_state:
+    st.session_state.raw_results = {}
+if 'last_query' not in st.session_state:
+    st.session_state.last_query = ""
 
 # Search input
 col1, col2 = st.columns([3, 1])
 with col1:
     search_query = st.text_input(
         "Enter company or donor name",
-        placeholder="e.g., Google AND Microsoft, Shell OR BP, NOT Anonymous",
-        help="Search for donations. Supports Boolean: AND (all match), OR (any match), NOT (exclude)"
+        placeholder="e.g., Google OR Microsoft OR Apple, NOT Anonymous",
+        help="Search for donations. Supports: OR (any match), NOT (exclude)"
     )
     
     # Show Boolean query help
     if search_query and is_boolean_query(search_query):
         parsed = parse_boolean_query(search_query)
-        if parsed['type'] == 'AND':
-            st.caption(f"🔍 Boolean AND: Results must contain ALL terms")
-        elif parsed['type'] == 'OR':
+        if parsed['type'] == 'OR':
             st.caption(f"🔍 Boolean OR: Results contain ANY of the terms")
         elif parsed['type'] == 'NOT':
             st.caption(f"🔍 Boolean NOT: Excluding results containing '{parsed['term']}'")
@@ -1529,284 +1512,336 @@ with col1:
 with col2:
     search_button = st.button("🔍 Search", type="primary", use_container_width=True)
 
-# Perform search
+# Perform search - store raw results in session state
 if search_button and search_query:
+    # Clear exclusions for new search
+    st.session_state.excluded_donors = set()
+    st.session_state.last_query = search_query
+    
     with st.spinner("Searching donation databases..."):
-        # Initialize results
-        all_results = {}
+        raw_results = {}
         
-        # Search UK
-        st.write("### 🇬🇧 United Kingdom")
-        uk_results = search_uk_donations(search_query, search_years)
-        all_results['uk'] = uk_results
+        # Search all jurisdictions
+        raw_results['uk'] = search_uk_donations(search_query, search_years)
+        raw_results['germany'] = search_germany_donations(search_query, search_years)
+        raw_results['austria'] = search_austria_donations(search_query)
+        raw_results['italy'] = search_italy_donations(search_query)
+        raw_results['netherlands'], raw_results['nl_full_data'] = search_netherlands_donations(search_query)
+        raw_results['eu'] = search_eu_donations(search_query)
         
-        if not uk_results.empty:
-            st.success(f"Found {len(uk_results)} donation records in UK")
+        st.session_state.raw_results = raw_results
+
+# Display results if we have them
+if st.session_state.raw_results and st.session_state.last_query:
+    raw_results = st.session_state.raw_results
+    
+    # Collect all unique donor names for exclusion panel
+    all_donors = set()
+    donor_columns = {
+        'uk': 'DonorName',
+        'germany': 'Donor',
+        'austria': 'Donor', 
+        'italy': 'Donor',
+        'netherlands': 'Donor',
+        'eu': 'Donor'
+    }
+    
+    for country, col in donor_columns.items():
+        if country in raw_results and not raw_results[country].empty:
+            df = raw_results[country]
+            if col in df.columns:
+                all_donors.update(df[col].dropna().unique())
+    
+    # Exclusion panel in sidebar
+    if all_donors:
+        with st.sidebar:
+            st.write("### 🚫 Exclude False Positives")
+            st.caption("Uncheck donors to remove from results & export")
             
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = uk_results['ValueNumeric'].sum() if 'ValueNumeric' in uk_results.columns else 0
-                st.metric("Total Value", f"£{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(uk_results))
-            with col3:
-                if 'RegulatedEntityName' in uk_results.columns:
-                    unique_parties = uk_results['RegulatedEntityName'].nunique()
-                    st.metric("Parties", unique_parties)
+            # Sort donors alphabetically
+            sorted_donors = sorted(all_donors, key=str.lower)
             
-            # Display formatted table
-            formatted_uk = format_uk_results(uk_results)
-            st.dataframe(formatted_uk, use_container_width=True, hide_index=True)
+            # Create checkboxes for each donor
+            for donor in sorted_donors:
+                is_excluded = donor in st.session_state.excluded_donors
+                # Use checkbox - checked means INCLUDED
+                include = st.checkbox(
+                    donor[:50] + "..." if len(donor) > 50 else donor,
+                    value=not is_excluded,
+                    key=f"donor_{hash(donor)}"
+                )
+                if not include:
+                    st.session_state.excluded_donors.add(donor)
+                elif donor in st.session_state.excluded_donors:
+                    st.session_state.excluded_donors.discard(donor)
             
-            # Party breakdown
-            if 'RegulatedEntityName' in uk_results.columns and 'ValueNumeric' in uk_results.columns:
-                st.write("**Donations by Party:**")
-                party_summary = uk_results.groupby('RegulatedEntityName').agg({
-                    'ValueNumeric': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (£)', 'Count']
-                party_summary = party_summary.sort_values('Total (£)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No UK donation records found for this search term.")
+            if st.session_state.excluded_donors:
+                st.warning(f"Excluding {len(st.session_state.excluded_donors)} donor(s)")
+                if st.button("Clear all exclusions"):
+                    st.session_state.excluded_donors = set()
+                    st.rerun()
+    
+    # Apply exclusions to get filtered results
+    def apply_exclusions(df, donor_col):
+        if df.empty or not st.session_state.excluded_donors:
+            return df
+        if donor_col in df.columns:
+            return df[~df[donor_col].isin(st.session_state.excluded_donors)].copy()
+        return df
+    
+    uk_results = apply_exclusions(raw_results.get('uk', pd.DataFrame()), 'DonorName')
+    germany_results = apply_exclusions(raw_results.get('germany', pd.DataFrame()), 'Donor')
+    austria_results = apply_exclusions(raw_results.get('austria', pd.DataFrame()), 'Donor')
+    italy_results = apply_exclusions(raw_results.get('italy', pd.DataFrame()), 'Donor')
+    netherlands_results = apply_exclusions(raw_results.get('netherlands', pd.DataFrame()), 'Donor')
+    eu_results = apply_exclusions(raw_results.get('eu', pd.DataFrame()), 'Donor')
+    nl_full_data = raw_results.get('nl_full_data', False)
+    
+    # Show exclusion status
+    if st.session_state.excluded_donors:
+        st.info(f"🚫 **Excluding {len(st.session_state.excluded_donors)} donor(s):** {', '.join(sorted(st.session_state.excluded_donors))}")
+    
+    # Display UK results
+    st.write("### 🇬🇧 United Kingdom")
+    
+    if not uk_results.empty:
+        st.success(f"Found {len(uk_results)} donation records in UK")
         
-        st.caption(f"**Note:** Showing last {search_years} years. Includes donations to parties and MPs.")
-        
-        st.divider()
-        
-        # Search Germany
-        st.write("### 🇩🇪 Germany")
-        with st.spinner("Scraping Bundestag donations data..."):
-            germany_results = search_germany_donations(search_query, search_years)
-        all_results['germany'] = germany_results
-        
-        if not germany_results.empty:
-            st.success(f"Found {len(germany_results)} donation records in Germany")
-            
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = germany_results['Amount'].sum()
-                st.metric("Total Value", f"€{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(germany_results))
-            with col3:
-                unique_parties = germany_results['Party'].nunique()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = uk_results['ValueNumeric'].sum() if 'ValueNumeric' in uk_results.columns else 0
+            st.metric("Total Value", f"£{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(uk_results))
+        with col3:
+            if 'RegulatedEntityName' in uk_results.columns:
+                unique_parties = uk_results['RegulatedEntityName'].nunique()
                 st.metric("Parties", unique_parties)
-            
-            # Display formatted table
-            formatted_de = format_germany_results(germany_results)
-            st.dataframe(formatted_de, use_container_width=True, hide_index=True)
-            
-            # Party breakdown
-            if 'Party' in germany_results.columns:
-                st.write("**Donations by Party:**")
-                party_summary = germany_results.groupby('Party').agg({
-                    'Amount': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (€)', 'Count']
-                party_summary = party_summary.sort_values('Total (€)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No German donation records found for this search term.")
         
-        st.caption("**Note:** German data covers large donations >€35,000 (since March 2024) or >€50,000 (before March 2024).")
+        formatted_uk = format_uk_results(uk_results)
+        st.dataframe(formatted_uk, use_container_width=True, hide_index=True)
         
-        st.divider()
+        if 'RegulatedEntityName' in uk_results.columns and 'ValueNumeric' in uk_results.columns:
+            st.write("**Donations by Party:**")
+            party_summary = uk_results.groupby('RegulatedEntityName').agg({
+                'ValueNumeric': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (£)', 'Count']
+            party_summary = party_summary.sort_values('Total (£)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No UK donation records found for this search term.")
+    
+    st.caption(f"**Note:** Showing last {search_years} years. Includes donations to parties and MPs.")
+    
+    st.divider()
+    
+    # Display Germany results
+    st.write("### 🇩🇪 Germany")
+    
+    if not germany_results.empty:
+        st.success(f"Found {len(germany_results)} donation records in Germany")
         
-        # Search Austria
-        st.write("### 🇦🇹 Austria")
-        with st.spinner("Downloading Austrian Rechnungshof donations data..."):
-            austria_results = search_austria_donations(search_query)
-        all_results['austria'] = austria_results
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = germany_results['Amount'].sum()
+            st.metric("Total Value", f"€{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(germany_results))
+        with col3:
+            unique_parties = germany_results['Party'].nunique()
+            st.metric("Parties", unique_parties)
         
-        if not austria_results.empty:
-            st.success(f"Found {len(austria_results)} donation records in Austria")
-            
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = austria_results['Amount'].sum()
-                st.metric("Total Value", f"€{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(austria_results))
-            with col3:
-                unique_parties = austria_results['Party'].nunique()
-                st.metric("Parties", unique_parties)
-            
-            # Display formatted table
-            formatted_at = format_austria_results(austria_results)
-            st.dataframe(formatted_at, use_container_width=True, hide_index=True)
-            
-            # Party breakdown
-            if 'Party' in austria_results.columns:
-                st.write("**Donations by Party:**")
-                party_summary = austria_results.groupby('Party').agg({
-                    'Amount': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (€)', 'Count']
-                party_summary = party_summary.sort_values('Total (€)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No Austrian donation records found for this search term.")
+        formatted_de = format_germany_results(germany_results)
+        st.dataframe(formatted_de, use_container_width=True, hide_index=True)
         
-        st.caption("**Note:** Austrian data covers donations >€500. Threshold for immediate reporting: €2,500.")
+        if 'Party' in germany_results.columns:
+            st.write("**Donations by Party:**")
+            party_summary = germany_results.groupby('Party').agg({
+                'Amount': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (€)', 'Count']
+            party_summary = party_summary.sort_values('Total (€)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No German donation records found for this search term.")
+    
+    st.caption("**Note:** German data covers large donations >€35,000 (since March 2024) or >€50,000 (before March 2024).")
+    
+    st.divider()
+    
+    # Display Austria results
+    st.write("### 🇦🇹 Austria")
+    
+    if not austria_results.empty:
+        st.success(f"Found {len(austria_results)} donation records in Austria")
         
-        st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = austria_results['Amount'].sum()
+            st.metric("Total Value", f"€{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(austria_results))
+        with col3:
+            unique_parties = austria_results['Party'].nunique()
+            st.metric("Parties", unique_parties)
         
-        # Search Italy
-        st.write("### 🇮🇹 Italy")
-        with st.spinner("Downloading Italian political donations data..."):
-            italy_results = search_italy_donations(search_query)
-        all_results['italy'] = italy_results
+        formatted_at = format_austria_results(austria_results)
+        st.dataframe(formatted_at, use_container_width=True, hide_index=True)
         
-        if not italy_results.empty:
-            st.success(f"Found {len(italy_results)} donation records in Italy")
-            
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = italy_results['Amount'].sum()
-                st.metric("Total Value", f"€{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(italy_results))
-            with col3:
-                unique_parties = italy_results['Party'].nunique()
-                st.metric("Parties", unique_parties)
-            
-            # Display formatted table
-            formatted_it = format_italy_results(italy_results)
-            st.dataframe(formatted_it, use_container_width=True, hide_index=True)
-            
-            # Party breakdown
-            if 'Party' in italy_results.columns:
-                st.write("**Donations by Party:**")
-                party_summary = italy_results.groupby('Party').agg({
-                    'Amount': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (€)', 'Count']
-                party_summary = party_summary.sort_values('Total (€)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No Italian donation records found for this search term.")
+        if 'Party' in austria_results.columns:
+            st.write("**Donations by Party:**")
+            party_summary = austria_results.groupby('Party').agg({
+                'Amount': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (€)', 'Count']
+            party_summary = party_summary.sort_values('Total (€)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No Austrian donation records found for this search term.")
+    
+    st.caption("**Note:** Austrian data covers donations >€500. Threshold for immediate reporting: €2,500.")
+    
+    st.divider()
+    
+    # Display Italy results
+    st.write("### 🇮🇹 Italy")
+    
+    if not italy_results.empty:
+        st.success(f"Found {len(italy_results)} donation records in Italy")
         
-        st.caption("**Note:** Italian data covers donations >€500. Data includes 2018-2024 from Parliament publications.")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = italy_results['Amount'].sum()
+            st.metric("Total Value", f"€{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(italy_results))
+        with col3:
+            unique_parties = italy_results['Party'].nunique()
+            st.metric("Parties", unique_parties)
         
-        st.divider()
+        formatted_it = format_italy_results(italy_results)
+        st.dataframe(formatted_it, use_container_width=True, hide_index=True)
         
-        # Search Netherlands
-        st.write("### 🇳🇱 Netherlands")
-        with st.spinner("Downloading Dutch political donations data..."):
-            netherlands_results, nl_is_full_data = search_netherlands_donations(search_query)
-        all_results['netherlands'] = netherlands_results
+        if 'Party' in italy_results.columns:
+            st.write("**Donations by Party:**")
+            party_summary = italy_results.groupby('Party').agg({
+                'Amount': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (€)', 'Count']
+            party_summary = party_summary.sort_values('Total (€)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No Italian donation records found for this search term.")
+    
+    st.caption("**Note:** Italian data covers donations >€500. Data includes 2018-2024 from Parliament publications.")
+    
+    st.divider()
+    
+    # Display Netherlands results
+    st.write("### 🇳🇱 Netherlands")
+    
+    # Show data source info
+    if not nl_full_data:
+        st.warning("⚠️ **Limited data mode:** Showing cached corporate/foundation donations only (47 key records). "
+                  "For full data (789 records), install odfpy: `pip install odfpy`")
+    
+    if not netherlands_results.empty:
+        st.success(f"Found {len(netherlands_results)} donation records in Netherlands")
         
-        # Show data source info
-        if not nl_is_full_data:
-            st.warning("⚠️ **Limited data mode:** Showing cached corporate/foundation donations only (47 key records). "
-                      "For full data (789 records), install odfpy: `pip install odfpy`")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = netherlands_results['Amount'].sum()
+            st.metric("Total Value", f"€{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(netherlands_results))
+        with col3:
+            unique_parties = netherlands_results['Party'].nunique()
+            st.metric("Parties", unique_parties)
         
-        if not netherlands_results.empty:
-            st.success(f"Found {len(netherlands_results)} donation records in Netherlands")
-            
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = netherlands_results['Amount'].sum()
-                st.metric("Total Value", f"€{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(netherlands_results))
-            with col3:
-                unique_parties = netherlands_results['Party'].nunique()
-                st.metric("Parties", unique_parties)
-            
-            # Display formatted table
-            formatted_nl = format_netherlands_results(netherlands_results)
-            st.dataframe(formatted_nl, use_container_width=True, hide_index=True)
-            
-            # Party breakdown
-            if 'Party' in netherlands_results.columns:
-                st.write("**Donations by Party:**")
-                party_summary = netherlands_results.groupby('Party').agg({
-                    'Amount': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (€)', 'Count']
-                party_summary = party_summary.sort_values('Total (€)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No Dutch donation records found for this search term.")
+        formatted_nl = format_netherlands_results(netherlands_results)
+        st.dataframe(formatted_nl, use_container_width=True, hide_index=True)
         
-        st.caption("**Note:** Dutch data covers donations >€10,000 (2023-2025). Foreign donations are banned.")
+        if 'Party' in netherlands_results.columns:
+            st.write("**Donations by Party:**")
+            party_summary = netherlands_results.groupby('Party').agg({
+                'Amount': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (€)', 'Count']
+            party_summary = party_summary.sort_values('Total (€)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No Dutch donation records found for this search term.")
+    
+    st.caption("**Note:** Dutch data covers donations >€10,000 (2023-2025). Foreign donations are banned.")
+    
+    st.divider()
+    
+    # Display EU results
+    st.write("### 🇪🇺 European Union")
+    
+    if not eu_results.empty:
+        st.success(f"Found {len(eu_results)} donation records at EU level")
         
-        st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_value = eu_results['Amount'].sum()
+            st.metric("Total Value", f"€{total_value:,.2f}")
+        with col2:
+            st.metric("Number of Donations", len(eu_results))
+        with col3:
+            unique_parties = eu_results['Party'].nunique()
+            st.metric("EU Parties", unique_parties)
         
-        # Search EU
-        st.write("### 🇪🇺 European Union")
-        with st.spinner("Downloading EU APPF donations data..."):
-            eu_results = search_eu_donations(search_query)
-        all_results['eu'] = eu_results
+        formatted_eu = format_eu_results(eu_results)
+        st.dataframe(formatted_eu, use_container_width=True, hide_index=True)
         
-        if not eu_results.empty:
-            st.success(f"Found {len(eu_results)} donation records at EU level")
-            
-            # Display summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_value = eu_results['Amount'].sum()
-                st.metric("Total Value", f"€{total_value:,.2f}")
-            with col2:
-                st.metric("Number of Donations", len(eu_results))
-            with col3:
-                unique_parties = eu_results['Party'].nunique()
-                st.metric("EU Parties", unique_parties)
-            
-            # Display formatted table
-            formatted_eu = format_eu_results(eu_results)
-            st.dataframe(formatted_eu, use_container_width=True, hide_index=True)
-            
-            # Party breakdown
-            if 'Party' in eu_results.columns:
-                st.write("**Donations by EU Party:**")
-                party_summary = eu_results.groupby('Party').agg({
-                    'Amount': ['sum', 'count']
-                }).round(2)
-                party_summary.columns = ['Total (€)', 'Count']
-                party_summary = party_summary.sort_values('Total (€)', ascending=False)
-                st.dataframe(party_summary, use_container_width=True)
-        else:
-            st.info("No EU-level donation records found for this search term.")
+        if 'Party' in eu_results.columns:
+            st.write("**Donations by EU Party:**")
+            party_summary = eu_results.groupby('Party').agg({
+                'Amount': ['sum', 'count']
+            }).round(2)
+            party_summary.columns = ['Total (€)', 'Count']
+            party_summary = party_summary.sort_values('Total (€)', ascending=False)
+            st.dataframe(party_summary, use_container_width=True)
+    else:
+        st.info("No EU-level donation records found for this search term.")
+    
+    st.caption("**Note:** EU data covers donations to European political parties (e.g., EPP, PES, ALDE). Threshold: €12,000 for immediate disclosure.")
+    
+    # Add MEP resources info
+    with st.expander("🔍 Looking for individual MEP data?"):
+        st.markdown("""
+        MEPs don't receive "donations" like national MPs - they declare **gifts** and **outside income** separately:
         
-        st.caption("**Note:** EU data covers donations to European political parties (e.g., EPP, PES, ALDE). Threshold: €12,000 for immediate disclosure.")
+        - **[EU Integrity Watch](https://www.integritywatch.eu/mepincomes)** - MEP outside incomes & activities (Transparency International)
+        - **[EP Gifts Register](https://www.europarl.europa.eu/meps/en/about/meps)** - Gifts >€150 received by MEPs
+        - **[MEP Profile Pages](https://www.europarl.europa.eu/meps/en/home)** - Individual declarations of financial interests
         
-        # Add MEP resources info
-        with st.expander("🔍 Looking for individual MEP data?"):
-            st.markdown("""
-            MEPs don't receive "donations" like national MPs - they declare **gifts** and **outside income** separately:
-            
-            - **[EU Integrity Watch](https://www.integritywatch.eu/mepincomes)** - MEP outside incomes & activities (Transparency International)
-            - **[EP Gifts Register](https://www.europarl.europa.eu/meps/en/about/meps)** - Gifts >€150 received by MEPs
-            - **[MEP Profile Pages](https://www.europarl.europa.eu/meps/en/home)** - Individual declarations of financial interests
-            
-            *MEPs must declare gifts >€150, outside earnings >€5,000/year, and meetings with lobbyists.*
-            """)
-        
-        st.divider()
-        
-        # Export section
-        st.write("### 📥 Export Results")
-        
-        # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, italy_results, netherlands_results, eu_results)
-        
-        st.download_button(
-            label="📊 Download Excel Report",
-            data=excel_file,
-            file_name=f"donations_{search_query.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
-        
-        st.caption("Excel report includes all raw data, summary statistics, and source documentation.")
+        *MEPs must declare gifts >€150, outside earnings >€5,000/year, and meetings with lobbyists.*
+        """)
+    
+    st.divider()
+    
+    # Export section
+    st.write("### 📥 Export Results")
+    
+    # Show exclusion note if any
+    if st.session_state.excluded_donors:
+        st.info(f"📋 Export will exclude {len(st.session_state.excluded_donors)} donor(s): {', '.join(sorted(st.session_state.excluded_donors))}")
+    
+    # Generate Excel with filtered data
+    excel_file = create_excel_report(st.session_state.last_query, uk_results, germany_results, austria_results, italy_results, netherlands_results, eu_results)
+    
+    st.download_button(
+        label="📊 Download Excel Report",
+        data=excel_file,
+        file_name=f"donations_{st.session_state.last_query.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary"
+    )
+    
+    st.caption("Excel report includes filtered data (exclusions applied), summary statistics, and source documentation.")
 
 elif search_button:
     st.warning("Please enter a search term.")
