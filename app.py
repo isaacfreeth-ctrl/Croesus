@@ -33,7 +33,7 @@ Enter a company name to search across available databases.
 DATA_SOURCES = {
     "uk": {
         "name": "UK Electoral Commission",
-        "coverage": "2001-present",
+        "coverage": "Last 5 years (API has data from 2001)",
         "threshold": "£11,180 (central), £2,230 (accounting units)",
         "url": "https://search.electoralcommission.org.uk"
     },
@@ -1312,6 +1312,8 @@ if search_button and search_query:
                 st.dataframe(party_summary, use_container_width=True)
         else:
             st.info("No UK donation records found for this search term.")
+        
+        st.caption(f"**Note:** Showing last {search_years} years. UK threshold is £11,180 for central parties.")
         
         st.divider()
         
