@@ -71,7 +71,12 @@ DATA_SOURCES = {
         "coverage": "2018-present",
         "threshold": "€12,000",
         "url": "https://www.appf.europa.eu",
-        "includes": "EU-level parties only (MEP data on EP website)"
+        "includes": "EU-level parties only",
+        "mep_resources": {
+            "gifts_register": "https://www.europarl.europa.eu/meps/en/about/meps",
+            "integrity_watch": "https://www.integritywatch.eu/mepincomes",
+            "note": "MEPs declare gifts >€150 and outside income separately"
+        }
     }
 }
 
@@ -114,6 +119,7 @@ def search_uk_donations(query: str, years: int = 5) -> pd.DataFrame:
     Search UK Electoral Commission donations database.
     API endpoint allows CSV export with query parameters.
     Searches both Political Parties and Regulated Donees (MPs, Lords, etc.)
+    Supports Boolean queries (AND, OR, NOT).
     """
     base_url = "https://search.electoralcommission.org.uk/api/csv/Donations"
     
@@ -121,13 +127,61 @@ def search_uk_donations(query: str, years: int = 5) -> pd.DataFrame:
     end_date = datetime.now()
     start_date = end_date - timedelta(days=years * 365)
     
+    # For Boolean queries, we need to search for each term separately and combine
+    if is_boolean_query(query):
+        search_terms = get_search_terms(query)
+        all_dfs = []
+        
+        for term in search_terms:
+            params = {
+                "start": 0,
+                "rows": 500,
+                "query": term,
+                "sort": "AcceptedDate",
+                "order": "desc",
+                "date": "Accepted",
+                "from": start_date.strftime("%Y-%m-%d"),
+                "to": end_date.strftime("%Y-%m-%d"),
+                "prePoll": "false",
+                "postPoll": "true"
+            }
+            
+            try:
+                response = requests.get(base_url, params=params, timeout=30)
+                if response.status_code == 200 and response.content:
+                    df = pd.read_csv(BytesIO(response.content))
+                    if not df.empty:
+                        all_dfs.append(df)
+            except:
+                pass
+        
+        if not all_dfs:
+            return pd.DataFrame()
+        
+        # Combine all results and remove duplicates
+        combined = pd.concat(all_dfs, ignore_index=True)
+        if 'ECRef' in combined.columns:
+            combined = combined.drop_duplicates(subset=['ECRef'])
+        
+        # Clean up
+        combined.columns = combined.columns.str.strip()
+        if 'Value' in combined.columns:
+            combined['ValueNumeric'] = combined['Value'].str.replace('£', '').str.replace(',', '').astype(float)
+        if 'AcceptedDate' in combined.columns:
+            combined['AcceptedDate'] = pd.to_datetime(combined['AcceptedDate'], format='%d/%m/%Y', errors='coerce')
+        combined['Source'] = 'UK Electoral Commission'
+        
+        # Apply Boolean filter
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(combined, parsed_query, 'DonorName')
+    
+    # Simple single-term search
     params = {
         "start": 0,
         "rows": 500,
         "query": query,
         "sort": "AcceptedDate",
         "order": "desc",
-        # Note: removed "et": "pp" to include both Political Parties AND Regulated Donees (MPs, etc.)
         "date": "Accepted",
         "from": start_date.strftime("%Y-%m-%d"),
         "to": end_date.strftime("%Y-%m-%d"),
@@ -271,6 +325,7 @@ def search_germany_donations(query: str, years: int = 5) -> pd.DataFrame:
     """
     Search German party donations by scraping Bundestag website.
     Returns donations matching the search query.
+    Supports Boolean queries (AND, OR, NOT).
     """
     current_year = datetime.now().year
     all_donations = []
@@ -288,7 +343,12 @@ def search_germany_donations(query: str, years: int = 5) -> pd.DataFrame:
     
     combined = pd.concat(all_donations, ignore_index=True)
     
-    # Filter by search query (case-insensitive search in donor field)
+    # Handle Boolean queries
+    if is_boolean_query(query):
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(combined, parsed_query, 'DonorFull')
+    
+    # Simple search - filter by search query (case-insensitive search in donor field)
     query_lower = query.lower()
     mask = combined['DonorFull'].str.lower().str.contains(query_lower, na=False)
     
@@ -378,6 +438,7 @@ def search_eu_donations(query: str) -> pd.DataFrame:
     """
     Search EU Authority for Political Parties and Foundations.
     Downloads and parses Excel files from APPF website.
+    Supports Boolean queries (AND, OR, NOT).
     """
     # EU APPF Excel file URLs
     eu_files = {
@@ -397,10 +458,15 @@ def search_eu_donations(query: str) -> pd.DataFrame:
         st.warning("No EU donation data could be loaded. Check network connection.")
         return pd.DataFrame()
     
-    # Convert to DataFrame and search
+    # Convert to DataFrame
     df = pd.DataFrame(all_donations)
     
-    # Filter by query (case-insensitive search in Donor field)
+    # Handle Boolean queries
+    if is_boolean_query(query):
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(df, parsed_query, 'Donor')
+    
+    # Simple search - filter by query (case-insensitive search in Donor field)
     query_lower = query.lower()
     mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
     
@@ -523,6 +589,7 @@ def search_austria_donations(query: str) -> pd.DataFrame:
     """
     Search Austrian Rechnungshof donation data.
     Downloads CSV files from the Court of Audit website.
+    Supports Boolean queries (AND, OR, NOT).
     """
     # Austrian CSV file URLs (different paths per year)
     austria_files = {
@@ -543,10 +610,15 @@ def search_austria_donations(query: str) -> pd.DataFrame:
         st.warning("No Austrian donation data could be loaded.")
         return pd.DataFrame()
     
-    # Convert to DataFrame and search
+    # Convert to DataFrame
     df = pd.DataFrame(all_donations)
     
-    # Filter by query (case-insensitive search in Donor field)
+    # Handle Boolean queries
+    if is_boolean_query(query):
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(df, parsed_query, 'Donor')
+    
+    # Simple search - filter by query (case-insensitive search in Donor field)
     query_lower = query.lower()
     mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
     
@@ -634,14 +706,19 @@ def download_italy_data() -> pd.DataFrame:
 
 
 def search_italy_donations(query: str) -> pd.DataFrame:
-    """Search Italian political donations data."""
+    """Search Italian political donations data. Supports Boolean queries (AND, OR, NOT)."""
     df = download_italy_data()
     
     if df.empty:
         st.warning("No Italian donation data could be loaded.")
         return pd.DataFrame()
     
-    # Filter by query (case-insensitive search in Donor field)
+    # Handle Boolean queries
+    if is_boolean_query(query):
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(df, parsed_query, 'Donor')
+    
+    # Simple search - filter by query (case-insensitive search in Donor field)
     query_lower = query.lower()
     mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
     
@@ -811,14 +888,19 @@ def get_netherlands_data() -> tuple[pd.DataFrame, bool]:
 
 
 def search_netherlands_donations(query: str) -> tuple[pd.DataFrame, bool]:
-    """Search Dutch political donations data.
+    """Search Dutch political donations data. Supports Boolean queries (AND, OR, NOT).
     Returns (results_dataframe, is_using_full_data)."""
     combined, is_full_data = get_netherlands_data()
     
     if combined.empty:
         return pd.DataFrame(), False
     
-    # Filter by query
+    # Handle Boolean queries
+    if is_boolean_query(query):
+        parsed_query = parse_boolean_query(query)
+        return apply_boolean_filter(combined, parsed_query, 'Donor'), is_full_data
+    
+    # Simple search - filter by query
     query_lower = query.lower()
     mask = combined['Donor'].str.lower().str.contains(query_lower, na=False)
     
@@ -1265,14 +1347,184 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
 
 # ============= MAIN INTERFACE =============
 
+# ============= BOOLEAN SEARCH SUPPORT =============
+
+def parse_boolean_query(query: str) -> dict:
+    """
+    Parse a Boolean search query into components.
+    Supports: AND, OR, NOT operators (case-insensitive)
+    Returns dict with 'type' and 'terms' or nested structure.
+    
+    Examples:
+        "Google" -> single term search
+        "Google AND Microsoft" -> all terms must match
+        "Google OR Microsoft" -> any term matches
+        "Google AND Microsoft OR Apple" -> (Google AND Microsoft) OR Apple
+        "NOT Google" -> exclude Google
+    """
+    query = query.strip()
+    
+    # Check for operators (case-insensitive)
+    query_upper = query.upper()
+    
+    # Handle NOT at the start
+    if query_upper.startswith('NOT '):
+        return {
+            'type': 'NOT',
+            'term': query[4:].strip()
+        }
+    
+    # Split by OR first (lower precedence)
+    if ' OR ' in query_upper:
+        parts = []
+        current = ""
+        i = 0
+        while i < len(query):
+            if query_upper[i:i+4] == ' OR ':
+                if current.strip():
+                    parts.append(current.strip())
+                current = ""
+                i += 4
+            else:
+                current += query[i]
+                i += 1
+        if current.strip():
+            parts.append(current.strip())
+        
+        if len(parts) > 1:
+            return {
+                'type': 'OR',
+                'terms': [parse_boolean_query(p) for p in parts]
+            }
+    
+    # Split by AND (higher precedence)
+    if ' AND ' in query_upper:
+        parts = []
+        current = ""
+        i = 0
+        while i < len(query):
+            if query_upper[i:i+5] == ' AND ':
+                if current.strip():
+                    parts.append(current.strip())
+                current = ""
+                i += 5
+            else:
+                current += query[i]
+                i += 1
+        if current.strip():
+            parts.append(current.strip())
+        
+        if len(parts) > 1:
+            return {
+                'type': 'AND',
+                'terms': [parse_boolean_query(p) for p in parts]
+            }
+    
+    # Simple term
+    return {
+        'type': 'TERM',
+        'term': query
+    }
+
+
+def apply_boolean_filter(df: pd.DataFrame, query: dict, column: str) -> pd.DataFrame:
+    """
+    Apply a parsed Boolean query to filter a DataFrame.
+    
+    Args:
+        df: DataFrame to filter
+        query: Parsed Boolean query from parse_boolean_query()
+        column: Column name to search in
+    
+    Returns:
+        Filtered DataFrame
+    """
+    if df.empty:
+        return df
+    
+    if column not in df.columns:
+        return df
+    
+    col_lower = df[column].str.lower().fillna('')
+    
+    if query['type'] == 'TERM':
+        term = query['term'].lower()
+        mask = col_lower.str.contains(term, na=False)
+        return df[mask].copy()
+    
+    elif query['type'] == 'AND':
+        result = df.copy()
+        for sub_query in query['terms']:
+            result = apply_boolean_filter(result, sub_query, column)
+        return result
+    
+    elif query['type'] == 'OR':
+        masks = []
+        for sub_query in query['terms']:
+            sub_result = apply_boolean_filter(df, sub_query, column)
+            if not sub_result.empty:
+                masks.append(df.index.isin(sub_result.index))
+        
+        if not masks:
+            return pd.DataFrame()
+        
+        combined_mask = masks[0]
+        for m in masks[1:]:
+            combined_mask = combined_mask | m
+        return df[combined_mask].copy()
+    
+    elif query['type'] == 'NOT':
+        term = query['term'].lower()
+        mask = ~col_lower.str.contains(term, na=False)
+        return df[mask].copy()
+    
+    return df
+
+
+def get_search_terms(query: str) -> list:
+    """Extract individual search terms from a Boolean query for API calls."""
+    parsed = parse_boolean_query(query)
+    terms = []
+    
+    def extract_terms(q):
+        if q['type'] == 'TERM':
+            terms.append(q['term'])
+        elif q['type'] in ('AND', 'OR'):
+            for sub in q['terms']:
+                extract_terms(sub)
+        elif q['type'] == 'NOT':
+            terms.append(q['term'])
+    
+    extract_terms(parsed)
+    return terms
+
+
+def is_boolean_query(query: str) -> bool:
+    """Check if query contains Boolean operators."""
+    query_upper = query.upper()
+    return ' AND ' in query_upper or ' OR ' in query_upper or query_upper.startswith('NOT ')
+
+
+# ============= MAIN INTERFACE CONTINUED =============
+
 # Search input
 col1, col2 = st.columns([3, 1])
 with col1:
     search_query = st.text_input(
         "Enter company or donor name",
-        placeholder="e.g., JCB, Dyson, Unite the Union",
-        help="Search for donations by company name, individual, or organisation"
+        placeholder="e.g., Google AND Microsoft, Shell OR BP, NOT Anonymous",
+        help="Search for donations. Supports Boolean: AND (all match), OR (any match), NOT (exclude)"
     )
+    
+    # Show Boolean query help
+    if search_query and is_boolean_query(search_query):
+        parsed = parse_boolean_query(search_query)
+        if parsed['type'] == 'AND':
+            st.caption(f"🔍 Boolean AND: Results must contain ALL terms")
+        elif parsed['type'] == 'OR':
+            st.caption(f"🔍 Boolean OR: Results contain ANY of the terms")
+        elif parsed['type'] == 'NOT':
+            st.caption(f"🔍 Boolean NOT: Excluding results containing '{parsed['term']}'")
 
 with col2:
     search_button = st.button("🔍 Search", type="primary", use_container_width=True)
@@ -1525,6 +1777,18 @@ if search_button and search_query:
             st.info("No EU-level donation records found for this search term.")
         
         st.caption("**Note:** EU data covers donations to European political parties (e.g., EPP, PES, ALDE). Threshold: €12,000 for immediate disclosure.")
+        
+        # Add MEP resources info
+        with st.expander("🔍 Looking for individual MEP data?"):
+            st.markdown("""
+            MEPs don't receive "donations" like national MPs - they declare **gifts** and **outside income** separately:
+            
+            - **[EU Integrity Watch](https://www.integritywatch.eu/mepincomes)** - MEP outside incomes & activities (Transparency International)
+            - **[EP Gifts Register](https://www.europarl.europa.eu/meps/en/about/meps)** - Gifts >€150 received by MEPs
+            - **[MEP Profile Pages](https://www.europarl.europa.eu/meps/en/home)** - Individual declarations of financial interests
+            
+            *MEPs must declare gifts >€150, outside earnings >€5,000/year, and meetings with lobbyists.*
+            """)
         
         st.divider()
         
