@@ -55,6 +55,12 @@ DATA_SOURCES = {
         "threshold": "€500 (disclosure), €5,000 (donor name required)",
         "url": "https://soldiepolitica.it"
     },
+    "netherlands": {
+        "name": "Dutch Ministry of Interior (BZK)",
+        "coverage": "2023-present",
+        "threshold": "€10,000 (immediate disclosure), €1,000 (annual)",
+        "url": "https://www.rijksoverheid.nl/onderwerpen/democratie/rol-politieke-partijen/giften-en-subsidies-politieke-partijen"
+    },
     "eu": {
         "name": "EU Authority for Political Parties",
         "coverage": "2018-present",
@@ -652,9 +658,105 @@ def format_italy_results(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+# ============= NETHERLANDS (Ministry of Interior - BZK) =============
+
+# Dutch government URLs for political donations (ODS files)
+NETHERLANDS_DATA_URLS = {
+    "2024": "https://www.rijksoverheid.nl/binaries/rijksoverheid/documenten/jaarverslagen/2024/01/11/overzicht-substantiele-giften-aan-politieke-partijen-2024/overzicht+substanti%C3%ABle+giften+aan+politieke+partijen+2024+versie+9+januari+2025.ods",
+    "2023": "https://www.rijksoverheid.nl/binaries/rijksoverheid/documenten/jaarverslagen/2023/01/27/overzicht-substantiele-giften-aan-politieke-partijen-2023/Overzicht+substanti%C3%ABle+giften+aan+politieke+partijen+2023+laatste+versie.ods",
+}
+
+
+def download_netherlands_ods(url: str) -> pd.DataFrame:
+    """Download and parse a Dutch ODS file."""
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return pd.DataFrame()
+        
+        from io import BytesIO
+        ods_data = BytesIO(response.content)
+        
+        # Read without header first to find the correct header row
+        df_raw = pd.read_excel(ods_data, engine='odf', header=None)
+        
+        # Find header row containing 'Naam donateur'
+        header_row = None
+        for i, row in df_raw.iterrows():
+            if 'Naam donateur' in str(row.values):
+                header_row = i
+                break
+        
+        if header_row is None:
+            return pd.DataFrame()
+        
+        # Re-read with correct header
+        ods_data.seek(0)
+        df = pd.read_excel(ods_data, engine='odf', header=header_row)
+        
+        # Filter to rows with actual donor names
+        df = df[df['Naam donateur'].notna()].copy()
+        
+        return df
+        
+    except Exception as e:
+        st.warning(f"Failed to download Netherlands data: {e}")
+        return pd.DataFrame()
+
+
+def search_netherlands_donations(query: str) -> pd.DataFrame:
+    """Search Dutch political donations data."""
+    all_data = []
+    
+    for year, url in NETHERLANDS_DATA_URLS.items():
+        df = download_netherlands_ods(url)
+        if not df.empty:
+            # Standardize column names
+            amount_col = f'Totaal {year}' if f'Totaal {year}' in df.columns else 'Totaalbedrag'
+            
+            df_clean = pd.DataFrame({
+                'Donor': df['Naam donateur'],
+                'Party': df['Politieke partij'],
+                'Amount': df.get(amount_col, 0),
+                'Location': df.get('Adres gever', ''),
+                'Date': df.get('Datum ', ''),
+                'Year': year,
+                'Source': 'Netherlands BZK'
+            })
+            all_data.append(df_clean)
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    combined = pd.concat(all_data, ignore_index=True)
+    
+    # Filter by query
+    query_lower = query.lower()
+    mask = combined['Donor'].str.lower().str.contains(query_lower, na=False)
+    
+    return combined[mask].copy()
+
+
+def format_netherlands_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Format Dutch results for display."""
+    if df.empty:
+        return df
+    
+    display_cols = ['Donor', 'Party', 'Amount', 'Location', 'Year']
+    available = [c for c in display_cols if c in df.columns]
+    result = df[available].copy()
+    
+    result = result.rename(columns={
+        'Amount': 'Amount (€)',
+        'Location': 'City'
+    })
+    
+    return result
+
+
 # ============= EXCEL EXPORT =============
 
-def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, austria_data: pd.DataFrame = None, italy_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
+def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, austria_data: pd.DataFrame = None, italy_data: pd.DataFrame = None, netherlands_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
     """
     Create multi-tab Excel report with all donation data.
     """
@@ -798,6 +900,26 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         row += 1
     else:
         ws_summary.cell(row=row, column=1, value="Italy").border = border
+        ws_summary.cell(row=row, column=2, value=0).border = border
+        ws_summary.cell(row=row, column=3, value="-").border = border
+        ws_summary.cell(row=row, column=4, value="-").border = border
+        row += 1
+    
+    # Netherlands stats
+    if netherlands_data is not None and not netherlands_data.empty:
+        nl_total = netherlands_data['Amount'].sum() if 'Amount' in netherlands_data.columns else 0
+        nl_dates = ""
+        if 'Year' in netherlands_data.columns:
+            nl_dates = f"{netherlands_data['Year'].min()} to {netherlands_data['Year'].max()}"
+        
+        ws_summary.cell(row=row, column=1, value="Netherlands").border = border
+        ws_summary.cell(row=row, column=2, value=len(netherlands_data)).border = border
+        cell = ws_summary.cell(row=row, column=3, value=f"€{nl_total:,.2f}")
+        cell.border = border
+        ws_summary.cell(row=row, column=4, value=nl_dates).border = border
+        row += 1
+    else:
+        ws_summary.cell(row=row, column=1, value="Netherlands").border = border
         ws_summary.cell(row=row, column=2, value=0).border = border
         ws_summary.cell(row=row, column=3, value="-").border = border
         ws_summary.cell(row=row, column=4, value="-").border = border
@@ -958,6 +1080,36 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
             adjusted_width = min(max_length + 2, 50)
             ws_it.column_dimensions[column].width = adjusted_width
     
+    # ===== NETHERLANDS DATA SHEET =====
+    if netherlands_data is not None and not netherlands_data.empty:
+        ws_nl = wb.create_sheet("Netherlands - BZK")
+        
+        # Write headers
+        for col, header in enumerate(netherlands_data.columns, 1):
+            cell = ws_nl.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        # Write data
+        for row_idx, row_data in enumerate(netherlands_data.values, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_nl.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        
+        # Adjust column widths
+        for col in ws_nl.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws_nl.column_dimensions[column].width = adjusted_width
+    
     # ===== DATA SOURCES SHEET =====
     ws_sources = wb.create_sheet("Data Sources")
     
@@ -996,6 +1148,13 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         f"  Threshold: {DATA_SOURCES['italy']['threshold']}",
         "  Note: Data aggregated by OnData from official Parliament publications",
         "  Corporate donations allowed (€100K annual cap per donor)",
+        "",
+        "Dutch Ministry of Interior (BZK)",
+        f"  URL: {DATA_SOURCES['netherlands']['url']}",
+        f"  Coverage: {DATA_SOURCES['netherlands']['coverage']}",
+        f"  Threshold: {DATA_SOURCES['netherlands']['threshold']}",
+        "  Note: ODS files from rijksoverheid.nl",
+        "  Foreign donations banned, max €100K per donor",
         "",
         "Disclaimer:",
         "This report aggregates publicly available data from official sources.",
@@ -1194,6 +1353,46 @@ if search_button and search_query:
         
         st.divider()
         
+        # Search Netherlands
+        st.write("### 🇳🇱 Netherlands")
+        with st.spinner("Downloading Dutch political donations data..."):
+            netherlands_results = search_netherlands_donations(search_query)
+        all_results['netherlands'] = netherlands_results
+        
+        if not netherlands_results.empty:
+            st.success(f"Found {len(netherlands_results)} donation records in Netherlands")
+            
+            # Display summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_value = netherlands_results['Amount'].sum()
+                st.metric("Total Value", f"€{total_value:,.2f}")
+            with col2:
+                st.metric("Number of Donations", len(netherlands_results))
+            with col3:
+                unique_parties = netherlands_results['Party'].nunique()
+                st.metric("Parties", unique_parties)
+            
+            # Display formatted table
+            formatted_nl = format_netherlands_results(netherlands_results)
+            st.dataframe(formatted_nl, use_container_width=True, hide_index=True)
+            
+            # Party breakdown
+            if 'Party' in netherlands_results.columns:
+                st.write("**Donations by Party:**")
+                party_summary = netherlands_results.groupby('Party').agg({
+                    'Amount': ['sum', 'count']
+                }).round(2)
+                party_summary.columns = ['Total (€)', 'Count']
+                party_summary = party_summary.sort_values('Total (€)', ascending=False)
+                st.dataframe(party_summary, use_container_width=True)
+        else:
+            st.info("No Dutch donation records found for this search term.")
+        
+        st.caption("**Note:** Dutch data covers donations >€10,000. Foreign donations are banned.")
+        
+        st.divider()
+        
         # Search EU
         st.write("### 🇪🇺 European Union")
         with st.spinner("Downloading EU APPF donations data..."):
@@ -1238,7 +1437,7 @@ if search_button and search_query:
         st.write("### 📥 Export Results")
         
         # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, italy_results, eu_results)
+        excel_file = create_excel_report(search_query, uk_results, germany_results, austria_results, italy_results, netherlands_results, eu_results)
         
         st.download_button(
             label="📊 Download Excel Report",

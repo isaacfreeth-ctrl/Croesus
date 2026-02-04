@@ -10,6 +10,7 @@ Search for company or individual donations to political parties across European 
 | 🇩🇪 Germany | Bundestag | €35,000 | Web scraping | 2002+ |
 | 🇦🇹 Austria | Rechnungshof | €500 | CSV | 2023-2025 |
 | 🇮🇹 Italy | Parliament/TI Italia | €500 | CSV (GitHub) | 2018-2024 |
+| 🇳🇱 Netherlands | Ministry BZK | €10,000 | ODS | 2023-2024 |
 | 🇪🇺 EU | APPF | €12,000 | Excel | 2018+ |
 
 ## Installation
@@ -49,9 +50,16 @@ streamlit run app.py
 - URL: https://soldiepolitica.it
 - Data: https://github.com/ondata/liberiamoli-tutti
 - Coverage: 2018-2024
-- Threshold: €500 for disclosure, €5,000 for donor name
+- Threshold: €500 for disclosure
 - Corporate donations allowed (€100K annual cap)
-- Data aggregated by OnData from Parliament publications
+
+### Dutch Ministry of Interior (BZK)
+- URL: https://www.rijksoverheid.nl
+- Coverage: 2023-2024
+- ODS (OpenDocument Spreadsheet) files
+- Threshold: €10,000 for immediate disclosure, €1,000 for annual reports
+- Foreign donations banned, max €100K per donor
+- Most donations from politicians (GL, SP especially)
 
 ### EU Authority for Political Parties (APPF)
 - URL: https://www.appf.europa.eu
@@ -60,27 +68,32 @@ streamlit run app.py
 
 ## Example Searches
 
-- Corporate: "SRL" (Italian companies), "GmbH" (German/Austrian companies), "Ltd" (UK)
-- Specific: "Fininvest", "Ristonova", "JCB"
-- Foundations: "Stiftung" (German), "Fondazione" (Italian)
+- Corporate (NL): "B.V.", "Stichting", "Fonds", "Holding"
+- Corporate (IT): "SRL", "SPA", "Società"
+- Corporate (DE/AT): "GmbH", "AG", "Stiftung"
+- Corporate (UK): "Ltd", "PLC"
 
 ## Data Highlights
 
-### Italy (2024)
-- €41M total donations
-- 22,000+ donations
-- ~930 corporate donations (€5.5M)
-- Major parties: Forza Italia, Lega, FdI, M5S, PD
+### Netherlands (2023-2024)
+- ~500 donations tracked (>€10K threshold)
+- Total: ~€9M
+- Most donations are from politicians to their own parties
+- Corporate donors: ~65 (B.V., Stichting, Fonds)
+- Major parties: SP, GL, VVD, D66, FvD, Volt
 
-### Austria (2023-2025)
-- 550 donations tracked
-- Parties: SPÖ, ÖVP, NEOS, FPÖ, Die Grünen
+### Regulatory Notes
+- Netherlands: Foreign donations BANNED since 2023
+- Netherlands: Max €100K per donor per year
+- Netherlands: €10K+ must be reported within 3 days
+- Italy: Foreign donations restricted
+- Germany: No cap on individual donations
+- UK: Donors must be UK-registered
 
 ## Notes
 
 - Different countries have different disclosure thresholds
-- Italy and Austria allow corporate donations
-- Germany allows corporate donations with no cap
-- France banned corporate donations in 1995
-- UK requires donors to be UK-registered
-- ~68% of Italian party donations come from MPs themselves
+- Netherlands has highest disclosure threshold (€10K)
+- Austria has lowest threshold (€500)
+- Most Dutch party funding comes from MP contributions
+- Corporate influence more visible in Italy, Germany
