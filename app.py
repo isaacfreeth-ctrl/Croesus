@@ -106,6 +106,7 @@ def search_uk_donations(query: str, years: int = 5) -> pd.DataFrame:
     """
     Search UK Electoral Commission donations database.
     API endpoint allows CSV export with query parameters.
+    Searches both Political Parties and Regulated Donees (MPs, Lords, etc.)
     """
     base_url = "https://search.electoralcommission.org.uk/api/csv/Donations"
     
@@ -119,7 +120,7 @@ def search_uk_donations(query: str, years: int = 5) -> pd.DataFrame:
         "query": query,
         "sort": "AcceptedDate",
         "order": "desc",
-        "et": "pp",  # Political parties
+        # Note: removed "et": "pp" to include both Political Parties AND Regulated Donees (MPs, etc.)
         "date": "Accepted",
         "from": start_date.strftime("%Y-%m-%d"),
         "to": end_date.strftime("%Y-%m-%d"),
@@ -160,14 +161,12 @@ def format_uk_results(df: pd.DataFrame) -> pd.DataFrame:
     # Select and rename key columns
     column_map = {
         'DonorName': 'Donor',
-        'AccountingUnitName': 'Recipient',
-        'RegulatedEntityName': 'Party',
+        'RegulatedEntityName': 'Recipient',
+        'RegulatedEntityType': 'Recipient Type',
         'Value': 'Amount (£)',
         'AcceptedDate': 'Date',
         'DonorStatus': 'Donor Type',
         'DonationType': 'Donation Type',
-        'NatureOfDonation': 'Nature',
-        'IsSponsorship': 'Sponsorship'
     }
     
     available_cols = [c for c in column_map.keys() if c in df.columns]
@@ -1313,7 +1312,7 @@ if search_button and search_query:
         else:
             st.info("No UK donation records found for this search term.")
         
-        st.caption(f"**Note:** Showing last {search_years} years. UK threshold is £11,180 for central parties.")
+        st.caption(f"**Note:** Showing last {search_years} years. Includes donations to parties and MPs.")
         
         st.divider()
         
