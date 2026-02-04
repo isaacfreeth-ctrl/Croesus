@@ -293,24 +293,115 @@ def format_germany_results(df: pd.DataFrame) -> pd.DataFrame:
 
 # ============= EU LEVEL (APPF) =============
 
+def download_eu_donations_file(url: str) -> bytes:
+    """Download EU donations Excel file."""
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            return response.content
+    except Exception as e:
+        st.warning(f"Failed to download EU data: {e}")
+    return None
+
+
+def parse_eu_donations_excel(content: bytes, year: int) -> list:
+    """Parse EU APPF donations Excel file."""
+    if not content:
+        return []
+    
+    try:
+        df = pd.read_excel(BytesIO(content), header=None)
+    except:
+        return []
+    
+    donations = []
+    current_party = None
+    
+    for i, row in df.iterrows():
+        val0 = str(row[0]) if pd.notna(row[0]) else ''
+        val1 = str(row[1]) if pd.notna(row[1]) else ''
+        val2 = str(row[2]) if pd.notna(row[2]) else ''
+        
+        # Party header (starts with Ø or is a standalone party name)
+        if val0.startswith('Ø') or (val0 and not val1 and not val2 and len(val0) > 10 and 
+            any(x in val0 for x in ['Party', 'Movement', 'Alliance', 'Democrats', 'Conservatives'])):
+            current_party = val0.replace('Ø', '').replace('\xa0', ' ').strip()
+            continue
+        
+        # Skip header rows
+        if val0.strip().lower() in ['donor', 'donor ']:
+            continue
+        
+        # Data row - has country and numeric value
+        if current_party and val1 and val2:
+            try:
+                amount = float(str(val2).replace(',', '').replace(' ', ''))
+                donations.append({
+                    'Party': current_party,
+                    'Donor': val0.strip(),
+                    'Country': val1.strip(),
+                    'Amount': amount,
+                    'Year': year,
+                    'Source': 'EU APPF'
+                })
+            except:
+                pass
+    
+    return donations
+
+
 def search_eu_donations(query: str) -> pd.DataFrame:
     """
     Search EU Authority for Political Parties and Foundations.
+    Downloads and parses Excel files from APPF website.
     """
-    # APPF publishes donation data but access method needs verification
-    # For now, provide guidance
+    # EU APPF Excel file URLs
+    eu_files = {
+        2025: "https://www.appf.europa.eu/cmsdata/299571/2025%20PARTIES%20Donations%20table%20as%20of%202025-11-03.xlsx",
+        2024: "https://www.appf.europa.eu/cmsdata/291887/2024%20PARTIES%20Donations%20table%20as%20of%202024-12-04.xlsx",
+    }
     
-    st.info("""
-    **EU Level:** The Authority for European Political Parties publishes donation data.
-    Check [APPF Donations](https://www.appf.europa.eu/appf/en/donations-and-contributions).
-    """)
+    all_donations = []
     
-    return pd.DataFrame()
+    for year, url in eu_files.items():
+        content = download_eu_donations_file(url)
+        if content:
+            donations = parse_eu_donations_excel(content, year)
+            all_donations.extend(donations)
+    
+    if not all_donations:
+        st.warning("No EU donation data could be loaded. Check network connection.")
+        return pd.DataFrame()
+    
+    # Convert to DataFrame and search
+    df = pd.DataFrame(all_donations)
+    
+    # Filter by query (case-insensitive search in Donor field)
+    query_lower = query.lower()
+    mask = df['Donor'].str.lower().str.contains(query_lower, na=False)
+    
+    return df[mask].copy()
+
+
+def format_eu_results(df: pd.DataFrame) -> pd.DataFrame:
+    """Format EU results for display."""
+    if df.empty:
+        return df
+    
+    display_cols = ['Donor', 'Party', 'Amount', 'Country', 'Year']
+    available = [c for c in display_cols if c in df.columns]
+    result = df[available].copy()
+    
+    result = result.rename(columns={
+        'Amount': 'Amount (€)'
+    })
+    
+    return result
 
 
 # ============= EXCEL EXPORT =============
 
-def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None) -> BytesIO:
+def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: pd.DataFrame = None, eu_data: pd.DataFrame = None) -> BytesIO:
     """
     Create multi-tab Excel report with all donation data.
     """
@@ -399,11 +490,24 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         ws_summary.cell(row=row, column=4, value="-").border = border
         row += 1
     
-    # EU placeholder
-    ws_summary.cell(row=row, column=1, value="EU").border = border
-    ws_summary.cell(row=row, column=2, value="See APPF").border = border
-    ws_summary.cell(row=row, column=3, value="-").border = border
-    ws_summary.cell(row=row, column=4, value="-").border = border
+    # EU stats
+    if eu_data is not None and not eu_data.empty:
+        eu_total = eu_data['Amount'].sum() if 'Amount' in eu_data.columns else 0
+        eu_dates = ""
+        if 'Year' in eu_data.columns:
+            eu_dates = f"{eu_data['Year'].min()} to {eu_data['Year'].max()}"
+        
+        ws_summary.cell(row=row, column=1, value="EU").border = border
+        ws_summary.cell(row=row, column=2, value=len(eu_data)).border = border
+        cell = ws_summary.cell(row=row, column=3, value=f"€{eu_total:,.2f}")
+        cell.border = border
+        ws_summary.cell(row=row, column=4, value=eu_dates).border = border
+        row += 1
+    else:
+        ws_summary.cell(row=row, column=1, value="EU").border = border
+        ws_summary.cell(row=row, column=2, value=0).border = border
+        ws_summary.cell(row=row, column=3, value="-").border = border
+        ws_summary.cell(row=row, column=4, value="-").border = border
     
     # Adjust column widths
     ws_summary.column_dimensions['A'].width = 20
@@ -471,6 +575,36 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
             adjusted_width = min(max_length + 2, 50)
             ws_de.column_dimensions[column].width = adjusted_width
     
+    # ===== EU DATA SHEET =====
+    if eu_data is not None and not eu_data.empty:
+        ws_eu = wb.create_sheet("EU - APPF")
+        
+        # Write headers
+        for col, header in enumerate(eu_data.columns, 1):
+            cell = ws_eu.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = border
+        
+        # Write data
+        for row_idx, row_data in enumerate(eu_data.values, 2):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_eu.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        
+        # Adjust column widths
+        for col in ws_eu.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws_eu.column_dimensions[column].width = adjusted_width
+    
     # ===== DATA SOURCES SHEET =====
     ws_sources = wb.create_sheet("Data Sources")
     
@@ -490,15 +624,20 @@ def create_excel_report(company_name: str, uk_data: pd.DataFrame, germany_data: 
         f"  Threshold: {DATA_SOURCES['germany']['threshold']}",
         "  Note: Data scraped from official Bundestag parliamentary publications",
         "",
-        "EU Authority for Political Parties",
+        "EU Authority for Political Parties (APPF)",
         f"  URL: {DATA_SOURCES['eu']['url']}",
         f"  Coverage: {DATA_SOURCES['eu']['coverage']}",
         f"  Threshold: {DATA_SOURCES['eu']['threshold']}",
+        "  Note: Covers European political parties (EPP, PES, ALDE, ECR, etc.)",
+        "  Data from published Excel files at appf.europa.eu/appf/en/donations-and-contributions",
         "",
         "Disclaimer:",
         "This report aggregates publicly available data from official sources.",
         "Different jurisdictions have different disclosure thresholds and requirements.",
         "Results may not represent all donations made by the searched entity.",
+        "",
+        "EU-level parties are distinct from national parties - they are pan-European",
+        "federations that coordinate policies across the European Parliament.",
     ]
     
     for row, text in enumerate(source_info, 2):
@@ -609,10 +748,43 @@ if search_button and search_query:
         
         st.divider()
         
-        # Search EU (placeholder)
+        # Search EU
         st.write("### 🇪🇺 European Union")
-        eu_results = search_eu_donations(search_query)
+        with st.spinner("Downloading EU APPF donations data..."):
+            eu_results = search_eu_donations(search_query)
         all_results['eu'] = eu_results
+        
+        if not eu_results.empty:
+            st.success(f"Found {len(eu_results)} donation records at EU level")
+            
+            # Display summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                total_value = eu_results['Amount'].sum()
+                st.metric("Total Value", f"€{total_value:,.2f}")
+            with col2:
+                st.metric("Number of Donations", len(eu_results))
+            with col3:
+                unique_parties = eu_results['Party'].nunique()
+                st.metric("EU Parties", unique_parties)
+            
+            # Display formatted table
+            formatted_eu = format_eu_results(eu_results)
+            st.dataframe(formatted_eu, use_container_width=True, hide_index=True)
+            
+            # Party breakdown
+            if 'Party' in eu_results.columns:
+                st.write("**Donations by EU Party:**")
+                party_summary = eu_results.groupby('Party').agg({
+                    'Amount': ['sum', 'count']
+                }).round(2)
+                party_summary.columns = ['Total (€)', 'Count']
+                party_summary = party_summary.sort_values('Total (€)', ascending=False)
+                st.dataframe(party_summary, use_container_width=True)
+        else:
+            st.info("No EU-level donation records found for this search term.")
+        
+        st.caption("**Note:** EU data covers donations to European political parties (e.g., EPP, PES, ALDE). Threshold: €12,000 for immediate disclosure.")
         
         st.divider()
         
@@ -620,7 +792,7 @@ if search_button and search_query:
         st.write("### 📥 Export Results")
         
         # Generate Excel
-        excel_file = create_excel_report(search_query, uk_results, germany_results)
+        excel_file = create_excel_report(search_query, uk_results, germany_results, eu_results)
         
         st.download_button(
             label="📊 Download Excel Report",
